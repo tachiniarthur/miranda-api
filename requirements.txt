@@ -1,0 +1,33 @@
+# ── Framework web e servidor ─────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# ── Banco de dados / ORM / migrations ────────────────────────────────
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# ── Validação / configuração ─────────────────────────────────────────
+pydantic==2.10.4
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# ── Autenticação (JWT + hashing de senha) ────────────────────────────
+PyJWT==2.10.1
+bcrypt==4.2.1
+
+# ── Upload de arquivos (multipart/form-data) ─────────────────────────
+python-multipart==0.0.20
+
+# ── IA self-hosted (análise de peça) — SEM nenhuma API paga ───────────
+# FashionCLIP (via transformers + torch), k-means (scikit-learn) e cor (Pillow).
+# IMPORTANTE: instale a variante CPU-only do torch para NÃO baixar dependências
+# de GPU (CUDA). Rode ANTES de `pip install -r requirements.txt`:
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Na primeira execução, os pesos do FashionCLIP (~600 MB) são baixados do
+# HuggingFace (exige internet uma vez); depois tudo roda localmente em CPU.
+torch>=2.2
+transformers>=4.46,<5
+scikit-learn>=1.4
+numpy>=1.26
+Pillow>=10.0

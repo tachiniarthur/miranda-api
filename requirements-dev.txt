@@ -1,0 +1,14 @@
+# ─────────────────────────────────────────────────────────────────────
+# Dependências de DESENVOLVIMENTO / TESTE do Miranda API.
+#
+# Não são necessárias para rodar a aplicação em produção — apenas para
+# executar a suíte de testes. Instale por cima das dependências principais:
+#     pip install -r requirements.txt -r requirements-dev.txt
+# ─────────────────────────────────────────────────────────────────────
+
+# Runner de testes.
+pytest==9.1.1
+
+# Cliente HTTP exigido pelo starlette.testclient.TestClient do FastAPI
+# (usado para exercitar as rotas em testes, ex.: POST /api/wardrobe/items/analyze).
+httpx==0.28.1

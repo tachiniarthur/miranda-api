@@ -1,0 +1,22 @@
+# Ambiente virtual Python
+.venv/
+venv/
+
+# Variáveis de ambiente (segredos)
+.env
+
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Imagens enviadas pelos usuários (mantém a pasta, ignora o conteúdo)
+storage/clothing_images/*
+!storage/clothing_images/.gitkeep
+
+# Logs / SO
+*.log
+.DS_Store
