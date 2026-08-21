@@ -1,68 +1,61 @@
 """
-Composição do "look do dia" — 100% determinística, sem LLM nem API paga.
+Composição do "look do dia" — pré-filtro determinístico + API do Claude.
 
-A geração combina três etapas, todas baseadas nos atributos já salvos em
-`clothing_items`, no clima informado e na ocasião escolhida no formulário:
+Duas etapas, com naturezas deliberadamente diferentes:
 
-  1. Pré-filtros: descarta o que a OCASIÃO não admite (inviolável), mapeia a
-     temperatura de referência do dia para os pesos térmicos aceitáveis, mantém
-     o que está no REGISTRO da ocasião e prioriza peças à prova de chuva nas
-     posições mais expostas.
-  2. Composição: monta de 2 a 3 looks completos e coerentes (formalidade, cor e
-     ocasião), variando as peças principais entre os looks quando o
-     guarda-roupa permite.
-  3. Justificativa: gera uma frase editorial curta por look, a partir de
-     templates preenchidos com os atributos reais das peças, do clima e da
-     ocasião.
+  1. PRÉ-FILTRO (gratuito, determinístico, local). Descarta o que a OCASIÃO não
+     admite (inviolável) e reduz o guarda-roupa às peças cujo peso térmico cabe
+     no dia. Roda ANTES de qualquer chamada paga, por dois motivos: corta
+     tokens — e portanto custo — em toda geração, e resolve com uma regra de
+     três linhas uma decisão que não precisa de modelo de linguagem.
 
-── Entradas do usuário ──────────────────────────────────────────────────────
-· CONDIÇÕES CLIMÁTICAS são MÚLTIPLAS (`weather["condicoes"]` é uma lista): sol
-  com vento, chuva com frio, etc. As flags derivadas são independentes entre si
-  e se acumulam — chuva+vento pede sobreposição pelos dois motivos.
-· OCASIÃO é ÚNICA e vira um `OccasionProfile` (ver `occasions.py`), que informa
-  alvo de formalidade, viés de conforto, viés de sobreposição, disciplina de cor
-  e categorias favorecidas/proibidas.
+  2. COMPOSIÇÃO (API do Claude). O subconjunto filtrado, o clima, a ocasião e os
+     looks recentes vão para o modelo, que decide as combinações e escreve as
+     justificativas seguindo o manual de estilo da Miranda
+     (`look_prompt.MIRANDA_SYSTEM_PROMPT`).
 
-Filosofia (igual à da análise de peça): degradar graciosamente. Nunca lança
-erro por falta de peças — devolve o que for possível, com uma nota quando o
-guarda-roupa está limitado para o clima ou para a ocasião.
+── O que mudou nesta migração ──────────────────────────────────────────────
+A composição por regras de cor e formalidade e as justificativas por template
+foram REMOVIDAS. Não sobraram como fallback: um motor de regras mantido só para
+emergências apodrece sem ninguém perceber, e a degradação honesta ("não foi
+possível gerar agora") é melhor produto que um look mediano assinado pela
+Miranda. A análise de peça (FashionCLIP, k-means, regras) não foi tocada e
+continua self-hosted e gratuita.
 
-Determinismo com variedade: as escolhas pseudo-aleatórias (desempate de peças e
-seleção de templates) usam uma semente derivada do clima + da ocasião + do
-conjunto de peças. Assim a mesma requisição sempre produz o mesmo resultado
-(testável), mas dias/ocasiões/guarda-roupas diferentes produzem looks e frases
-diferentes.
+── Custo ──────────────────────────────────────────────────────────────────
+Cada geração é uma chamada paga. O consumo de tokens e o custo estimado saem em
+log a cada chamada (ver `claude_client`). Não há controle de quota nesta fase.
 
-⚠️ LIMITAÇÃO CONHECIDA — a composição CONFIA NA CATEGORIA armazenada em cada peça
-(`category`), que vem da análise de imagem (FashionCLIP) ou do preenchimento
-manual. A estrutura de um look (nunca vestido com peça de baixo; nunca duas peças
-de baixo) é decidida por essa categoria, não por reconhecimento visual em tempo
-de composição. Portanto, **a qualidade da composição depende da qualidade da
-categorização**: um vestido rotulado por engano como `saia` será tratado como
-peça de baixo e combinado com uma peça de cima — o que parece um erro de
-composição, mas tem origem na categoria errada. Como nenhum classificador é
-perfeito, `_look_structure_is_valid` age como uma rede de segurança barata que
-rejeita, na saída, qualquer look estruturalmente inválido segundo a própria
-categoria (defesa em profundidade contra regressões futuras da lógica de montagem
-— não corrige categoria errada, mas garante que a REGRA nunca seja violada dado o
-que as categorias dizem).
+── Filosofia, inalterada ───────────────────────────────────────────────────
+Degradar graciosamente. Esta função NUNCA lança: guarda-roupa insuficiente, API
+fora do ar ou resposta ilegível viram `looks: []` com uma `note` que explica o
+que houve. A rota devolve HTTP 200 em todos os casos.
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
-import random
-from collections import Counter
+import time
 from typing import Any, Optional, TypedDict
 
-from app.services.ai.occasions import (
-    COLOR_NEUTRAL,
-    COLOR_STATEMENT,
-    FORMALITY_SCALE_SPAN,
-    OccasionProfile,
-    get_profile,
+from app.core.config import settings
+from app.services.ai import claude_client
+from app.services.ai.claude_client import LookApiFatal, LookApiTransient
+from app.services.ai.look_prompt import (
+    LOOK_LABELS,
+    LOOK_RESPONSE_SCHEMA,
+    MIRANDA_SYSTEM_PROMPT,
+    ROLE_ACCESSORY,
+    ROLE_BOTTOM,
+    ROLE_DRESS,
+    ROLE_FOOTWEAR,
+    ROLE_OUTER,
+    ROLE_TOP,
+    VALID_ROLES,
+    build_user_message,
 )
+from app.services.ai.occasions import OccasionProfile, get_profile
 
 logger = logging.getLogger("miranda.ai.look_generation")
 
@@ -91,10 +84,18 @@ class SuggestedLook(TypedDict):
 
 class DailyLookResult(TypedDict):
     looks: list[SuggestedLook]
-    # Nota opcional exibida quando o guarda-roupa está limitado para o clima ou
-    # para a ocasião (poucas peças, filtro relaxado, etc.). None quando a
-    # composição foi plena.
+    # Nota opcional: guarda-roupa limitado, filtro relaxado, ou a explicação da
+    # indisponibilidade. None quando a composição foi plena e sem ressalva.
     note: Optional[str]
+    # True somente quando a FALHA foi nossa (API fora do ar, chave inválida,
+    # resposta ilegível). Guarda-roupa insuficiente é `False`: não é falha, é
+    # uma resposta legítima sobre o acervo da pessoa. A distinção existe para o
+    # log e para o histórico — o frontend renderiza `note` nos dois casos.
+    unavailable: bool
+
+
+class LookParseError(Exception):
+    """A resposta da API não pôde ser interpretada como uma composição válida."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,95 +111,53 @@ FOOTWEAR = {"calcado"}               # calçado
 SCARVES = {"cachecol"}               # complemento de aquecimento
 ACCESSORIES = {"acessorio", "outros"}  # complemento opcional
 
-# Rótulos de papel exibidos ao usuário (PT).
-ROLE_BOTTOM = "peça de baixo"
-ROLE_TOP = "peça de cima"
-ROLE_OUTER = "sobreposição"
-ROLE_DRESS = "peça única"
-ROLE_FOOTWEAR = "calçado"
-ROLE_SCARF = "acessório"
-ROLE_ACCESSORY = "acessório"
-
 # ── Faixas de temperatura (°C) → pesos térmicos aceitáveis ───────────────────
 # A temperatura de referência dá MAIS peso à mínima ("vestir por segurança":
 # é pior passar frio do que calor), por isso 0.6*min + 0.4*max.
 TEMP_MIN_WEIGHT = 0.6
 TEMP_MAX_WEIGHT = 0.4
 
-# Cortes das faixas (ajustáveis). Abaixo de COLD_MAX = frio; entre COLD_MAX e
-# MILD_MAX = ameno; acima de MILD_MAX = quente.
 COLD_MAX = 15.0   # temp_ref < 15  → frio
 MILD_MAX = 25.0   # 15 <= temp_ref <= 25 → ameno ; > 25 → quente
 
-# Pesos térmicos aceitos em cada faixa. Peças fora do conjunto (com peso
-# conhecido e incompatível) são cortadas no pré-filtro; peças com peso NULO
-# passam sempre (política permissiva) com uma penalização de prioridade.
 BAND_COLD = "frio"
 BAND_MILD = "ameno"
 BAND_HOT = "quente"
+
+# Pesos aceitos em cada faixa. Peça com peso NULO passa sempre (política
+# permissiva): o campo fica vazio quando a análise não foi conclusiva, e cortar
+# a peça por isso puniria o usuário por uma limitação nossa.
 ACCEPTABLE_PESO: dict[str, set[str]] = {
     BAND_COLD: {"pesado", "medio"},
     BAND_MILD: {"medio", "leve"},
     BAND_HOT: {"leve"},
 }
 
-# ── Escala de formalidade ────────────────────────────────────────────────────
-# Ordinal onde a distância <= 1 = "adjacente" (combinável). "esporte" fica ao
-# lado de "casual" e longe de "social" — é o que evita o par esporte×social,
-# citado no spec como incoerente. É também a escala em que a ocasião posiciona
-# seu alvo (ver `occasions.py`).
-FORMALITY_RANK: dict[str, int] = {
-    "esporte": 0,
-    "casual": 1,
-    "smart_casual": 2,
-    "social": 3,
-}
-
-# ── Coordenação de cor ───────────────────────────────────────────────────────
-# Neutros combinam com quase tudo; cores fortes não devem competir entre si
-# (dois tons fortes DIFERENTES no mesmo look é evitado). Cor nula/desconhecida
-# é tratada como neutra (permissivo). Casamento por prefixo do nome de cor
-# (os nomes vêm de color_extraction, ex.: "azul-marinho", "cinza-claro").
-NEUTRAL_COLOR_PREFIXES = (
-    "preto", "cinza", "branco", "off-white", "bege", "caramelo",
-    "marrom", "nude", "areia", "creme", "grafite", "chumbo",
-)
-# Nomes que começam com um prefixo "forte" mas são, na prática, neutros de base
-# (avaliados antes de STRONG_COLOR_FAMILIES).
-NEUTRAL_STRONG_LOOKALIKES = ("azul-marinho",)
-# Prefixo do nome → família de cor forte (para detectar tons que competem).
-STRONG_COLOR_FAMILIES: dict[str, str] = {
-    "vermelho": "vermelho", "vinho": "vermelho", "coral": "vermelho",
-    "rosa": "rosa",
-    "laranja": "laranja",
-    "mostarda": "amarelo", "amarelo": "amarelo",
-    "verde": "verde",
-    "azul": "azul", "turquesa": "azul",
-    "roxo": "roxo", "lilás": "roxo", "lilas": "roxo",
-}
-
-# ── Pesos da ocasião na prioridade das peças ─────────────────────────────────
-# Calibração: o encaixe de formalidade (até +1.2) tem peso comparável ao do peso
-# térmico compatível (+1.5), de modo que a ocasião influencia de verdade sem
-# atropelar o conforto térmico. A penalidade por estar fora do registro (−1.0)
-# existe para o caso da relaxação, quando peças fora de registro voltam a
-# concorrer: elas entram, mas por último.
-OCCASION_FIT_WEIGHT = 1.2
-OCCASION_OFF_REGISTER_PENALTY = 1.0
-OCCASION_NULL_FORMALITY_PENALTY = 0.3
-# Peça pesada incomoda quando a ocasião envolve andar E o clima não exige.
-COMFORT_HEAVY_PENALTY = 0.6
-# Prêmio por ponto de cor nas ocasiões de "destaque".
-STATEMENT_COLOR_BONUS = 0.4
-# A partir deste viés, a ocasião pede sobreposição mesmo com clima ameno.
-LAYERING_THRESHOLD = 0.6
-
 MAX_LOOKS = 3
-MIN_DESIRED_LOOKS = 2
+
+# Espera entre tentativas, em segundos. Curta de propósito: há uma pessoa
+# olhando a tela de carregamento. Três tentativas somam menos de 2s de espera.
+RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.6, 1.5)
+
+_UNAVAILABLE_NOTE = (
+    "A Miranda não conseguiu compor o look agora. Tente novamente em instantes."
+)
+
+# Papel → conjunto de categorias que podem legitimamente ocupá-lo. Usado para
+# reconferir a saída do modelo: um "vestido" declarado como "peça de baixo"
+# passaria pelo schema (o enum só valida a string) e produziria um look errado.
+_ROLE_CATEGORIES: dict[str, set[str]] = {
+    ROLE_BOTTOM: BOTTOMS,
+    ROLE_TOP: TOPS,
+    ROLE_OUTER: OUTERS,
+    ROLE_DRESS: DRESSES,
+    ROLE_FOOTWEAR: FOOTWEAR,
+    ROLE_ACCESSORY: SCARVES | ACCESSORIES,
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Utilitários de clima e coerência
+# Pré-filtro (etapa 1 — gratuita)
 # ─────────────────────────────────────────────────────────────────────────────
 def _reference_temp(weather: WeatherInfo) -> float:
     return (
@@ -215,188 +174,15 @@ def _band_for(temp_ref: float) -> str:
     return BAND_HOT
 
 
-def _condition_flags(condicoes: list[str]) -> dict[str, bool]:
-    """
-    Deriva flags independentes a partir das condições marcadas.
-
-    As condições são combináveis, então as flags se ACUMULAM: ["chuva", "vento"]
-    liga `rainy` e `windy` ao mesmo tempo, e cada uma pesa por si na composição
-    (chuva prioriza peça impermeável; vento pede sobreposição).
-    """
-    joined = " ".join((c or "").strip().lower() for c in condicoes)
-    return {
-        "rainy": "chuva" in joined,
-        "windy": "vento" in joined,
-        "cold_signal": "frio" in joined,
-        "sunny": "sol" in joined,
-        "cloudy": "nublado" in joined,
-    }
-
-
-def _color_family(cor: Optional[str]) -> str:
-    """Mapeia um nome de cor para 'neutro' ou uma família de cor forte."""
-    if not cor:
-        return "neutro"
-    name = cor.strip().lower()
-    # Neutros "de fato" que começam com um prefixo forte e precisam ser tratados
-    # ANTES dele — o azul-marinho (navy) é um neutro clássico de alfaiataria,
-    # não um azul que compete por atenção.
-    for prefix in NEUTRAL_STRONG_LOOKALIKES:
-        if name.startswith(prefix):
-            return "neutro"
-    for prefix, family in STRONG_COLOR_FAMILIES.items():
-        if name.startswith(prefix):
-            return family
-    for prefix in NEUTRAL_COLOR_PREFIXES:
-        if name.startswith(prefix):
-            return "neutro"
-    # Desconhecida: tratada como neutra (permissivo, não corta o look).
-    return "neutro"
-
-
-def _max_strong_families(profile: OccasionProfile) -> int:
-    """
-    Quantas famílias de cor forte a ocasião tolera num mesmo look.
-
-    Ocasiões de disciplina "neutro" (reunião, entrevista, viagem) não admitem
-    nenhuma: o look não deve competir com quem o veste, nem exigir combinação
-    fina numa mala. As demais mantêm o teto histórico de uma.
-    """
-    return 0 if profile.color_discipline == COLOR_NEUTRAL else 1
-
-
-def _colors_ok(pieces: list[dict[str, Any]], profile: OccasionProfile) -> bool:
-    """Coerente se as famílias de cor forte couberem no teto da ocasião."""
-    strong = {
-        fam
-        for p in pieces
-        if (fam := _color_family(p.get("cor_primaria"))) != "neutro"
-    }
-    return len(strong) <= _max_strong_families(profile)
-
-
-def _formality_ok(a: Optional[str], b: Optional[str]) -> bool:
-    """Formalidades adjacentes (dist <= 1). Nulo é curinga (combina com tudo)."""
-    if a is None or b is None:
-        return True
-    ra, rb = FORMALITY_RANK.get(a), FORMALITY_RANK.get(b)
-    if ra is None or rb is None:
-        return True
-    return abs(ra - rb) <= 1
-
-
-def _look_formality_ok(pieces: list[dict[str, Any]]) -> bool:
-    ranks = [
-        FORMALITY_RANK[p["formalidade"]]
-        for p in pieces
-        if p.get("formalidade") in FORMALITY_RANK
-    ]
-    if len(ranks) < 2:
-        return True
-    return max(ranks) - min(ranks) <= 1
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Encaixe na ocasião
-# ─────────────────────────────────────────────────────────────────────────────
-def _formality_distance(
-    piece: dict[str, Any], profile: OccasionProfile
-) -> Optional[float]:
-    """Distância da peça ao alvo da ocasião. None quando a peça não tem registro."""
-    rank = FORMALITY_RANK.get(piece.get("formalidade"))
-    if rank is None:
-        return None
-    return abs(rank - profile.formality_target)
-
-
-def _in_register(piece: dict[str, Any], profile: OccasionProfile) -> bool:
-    """
-    Peça dentro do registro da ocasião.
-
-    Formalidade nula é CURINGA e entra (mesma política permissiva do peso
-    térmico): a IA de análise deixa esse campo nulo com frequência, e excluir
-    essas peças esvaziaria o guarda-roupa de quem não preencheu tudo à mão.
-    """
-    dist = _formality_distance(piece, profile)
-    return dist is None or dist <= profile.formality_tolerance
-
-
-def _occasion_score(
-    piece: dict[str, Any], profile: OccasionProfile, band: str
-) -> float:
-    """Contribuição da ocasião para a prioridade de uma peça."""
-    score = 0.0
-
-    dist = _formality_distance(piece, profile)
-    if dist is None:
-        # Curinga: entra, mas é uma aposta cega — vale menos que uma peça que
-        # comprovadamente pertence ao registro.
-        score -= OCCASION_NULL_FORMALITY_PENALTY
-    else:
-        score += OCCASION_FIT_WEIGHT * (1.0 - dist / FORMALITY_SCALE_SPAN)
-        if dist > profile.formality_tolerance:
-            score -= OCCASION_OFF_REGISTER_PENALTY
-
-    score += profile.category_bonus.get(piece.get("category"), 0.0)
-
-    # Conforto: só penaliza peça pesada quando o frio NÃO a justifica.
-    if band != BAND_COLD and piece.get("peso_termico") == "pesado":
-        score -= COMFORT_HEAVY_PENALTY * profile.comfort_bias
-
-    # Nas ocasiões de destaque, um ponto de cor é ativo — não só tolerado.
-    if profile.color_discipline == COLOR_STATEMENT:
-        if _color_family(piece.get("cor_primaria")) != "neutro":
-            score += STATEMENT_COLOR_BONUS
-
-    return score
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Prioridade das peças (quanto maior, melhor)
-# ─────────────────────────────────────────────────────────────────────────────
-def _piece_priority(
-    piece: dict[str, Any],
-    band: str,
-    flags: dict[str, bool],
-    exposed: bool,
-    profile: OccasionProfile,
-) -> float:
-    """
-    Pontua uma peça para o dia e para a ocasião. Peças com peso térmico definido
-    e compatível são preferidas; peças com atributos nulos entram (permissivo)
-    mas com leve penalização. Em dia de chuva, peças expostas à prova de chuva
-    ganham pontos. A ocasião entra por `_occasion_score`.
-    """
-    score = 0.0
-    peso = piece.get("peso_termico")
-    if peso is None:
-        score -= 0.5  # permissivo, mas menos confiável
-    else:
-        score += 1.0
-        if peso in ACCEPTABLE_PESO[band]:
-            score += 0.5
-
-    if flags["rainy"] and exposed:
-        if piece.get("serve_chuva") is True:
-            score += 1.0
-        elif piece.get("serve_chuva") is False:
-            score -= 0.5
-
-    score += _occasion_score(piece, profile, band)
-    return score
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Pré-filtros
-# ─────────────────────────────────────────────────────────────────────────────
 def _drop_forbidden(
     items: list[dict[str, Any]], profile: OccasionProfile
 ) -> list[dict[str, Any]]:
     """
     Remove as categorias que a ocasião NÃO ADMITE.
 
-    Este filtro é inviolável: nunca participa da cascata de relaxação. É
-    preferível não montar um look de academia a sugerir um blazer para ela.
+    Inviolável: nunca é relaxado, nem em guarda-roupa pobre. É preferível não
+    montar um look de academia a sugerir um blazer para ela — e é barato demais
+    para delegar ao modelo.
     """
     if not profile.forbidden_categories:
         return list(items)
@@ -409,24 +195,12 @@ def _thermal_prefilter(items: list[dict[str, Any]], band: str) -> list[dict[str,
     Peças com peso conhecido e incompatível são removidas.
     """
     acceptable = ACCEPTABLE_PESO[band]
-    kept = []
-    for it in items:
-        peso = it.get("peso_termico")
-        if peso is None or peso in acceptable:
-            kept.append(it)
-    return kept
+    return [
+        it for it in items
+        if it.get("peso_termico") is None or it.get("peso_termico") in acceptable
+    ]
 
 
-def _register_filter(
-    items: list[dict[str, Any]], profile: OccasionProfile
-) -> list[dict[str, Any]]:
-    """Mantém apenas peças no registro da ocasião (formalidade nula é curinga)."""
-    return [i for i in items if _in_register(i, profile)]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Montagem dos looks
-# ─────────────────────────────────────────────────────────────────────────────
 def _partition(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     slots: dict[str, list[dict[str, Any]]] = {
         "bottoms": [], "tops": [], "outers": [],
@@ -456,527 +230,199 @@ def _have_core(slots: dict[str, list[dict[str, Any]]]) -> bool:
     return bool(slots["dresses"]) or (bool(slots["bottoms"]) and bool(slots["tops"]))
 
 
-class _Base:
-    """Núcleo de um look (peça única, ou baixo+cima), antes de complementos."""
-
-    def __init__(self, mains: list[tuple[dict[str, Any], str]], score: float) -> None:
-        self.mains = mains  # lista de (peça, papel)
-        self.score = score  # soma bruta das prioridades das peças principais
-
-    @property
-    def main_ids(self) -> set[str]:
-        return {p["id"] for p, _ in self.mains}
-
-    @property
-    def quality(self) -> float:
-        """
-        Prioridade MÉDIA por peça principal — a métrica com que núcleos de
-        formatos diferentes se comparam.
-
-        A soma bruta não serve para isso: um par baixo+cima soma duas
-        prioridades e um vestido só uma, então o par vencia por ser composto de
-        duas peças, não por ser a melhor escolha. Na média, um vestido excelente
-        supera um par medíocre, que é o comportamento esperado — e é o que
-        permite às ocasiões que favorecem vestido (jantar romântico, evento
-        formal) efetivamente propô-lo.
-        """
-        return self.score / len(self.mains)
-
-
-def _build_bases(
-    slots: dict[str, list[dict[str, Any]]],
-    band: str,
-    flags: dict[str, bool],
-    profile: OccasionProfile,
-    rng: random.Random,
-) -> tuple[list[_Base], bool]:
-    """
-    Constrói os núcleos candidatos (vestidos e pares baixo+cima coerentes).
-
-    Retorna (bases, coerencia_relaxada). Se não houver nenhum par coerente mas
-    existirem baixo e cima, relaxa a coerência (usa todos os pares) e sinaliza.
-    """
-    bases: list[_Base] = []
-
-    # Vestidos: cada um é um núcleo por si só.
-    for dress in slots["dresses"]:
-        pr = _piece_priority(dress, band, flags, False, profile)
-        bases.append(_Base([(dress, ROLE_DRESS)], pr))
-
-    # Pares baixo+cima coerentes (formalidade adjacente + cor coordenada).
-    coherent_pairs: list[_Base] = []
-    for bottom in slots["bottoms"]:
-        for top in slots["tops"]:
-            if not _formality_ok(bottom.get("formalidade"), top.get("formalidade")):
-                continue
-            if not _colors_ok([bottom, top], profile):
-                continue
-            score = (
-                _piece_priority(bottom, band, flags, False, profile)
-                + _piece_priority(top, band, flags, False, profile)
-            )
-            coherent_pairs.append(_Base([(bottom, ROLE_BOTTOM), (top, ROLE_TOP)], score))
-
-    relaxed = False
-    if coherent_pairs:
-        bases.extend(coherent_pairs)
-    elif slots["bottoms"] and slots["tops"]:
-        # Sem par coerente: relaxa (melhor um look imperfeito do que nenhum).
-        relaxed = True
-        for bottom in slots["bottoms"]:
-            for top in slots["tops"]:
-                score = (
-                    _piece_priority(bottom, band, flags, False, profile)
-                    + _piece_priority(top, band, flags, False, profile)
-                )
-                bases.append(_Base([(bottom, ROLE_BOTTOM), (top, ROLE_TOP)], score))
-
-    # Ordena por qualidade média (desc) com desempate pseudo-aleatório estável.
-    # Média, e não soma, para que vestido e par disputem em pé de igualdade.
-    rng.shuffle(bases)
-    bases.sort(key=lambda b: b.quality, reverse=True)
-    return bases, relaxed
-
-
-def _select_varied(bases: list[_Base]) -> list[_Base]:
-    """
-    Seleciona até MAX_LOOKS núcleos priorizando VARIEDADE das peças principais:
-    a cada passo escolhe o núcleo de maior (novidade, score). Evita duplicatas.
-
-    A novidade é uma FRAÇÃO (peças inéditas ÷ peças do núcleo), não uma contagem
-    absoluta. A diferença importa: um vestido é um núcleo de uma peça e um par
-    baixo+cima é de duas, então na contagem absoluta o par vencia sempre por
-    2 > 1 — antes mesmo de o score ser consultado. Nenhum vestido chegava a ser
-    o primeiro look enquanto existisse um par qualquer, e as preferências de
-    ocasião por vestido (jantar romântico, evento formal) não tinham como se
-    manifestar. Normalizada, "totalmente novo" vale 1.0 nos dois formatos e o
-    desempate volta a ser o mérito da peça.
-    """
-    selected: list[_Base] = []
-    used_ids: set[str] = set()
-    used_signatures: set[frozenset[str]] = set()
-
-    remaining = list(bases)
-    while remaining and len(selected) < MAX_LOOKS:
-        def key(b: _Base) -> tuple[float, float]:
-            novelty = len(b.main_ids - used_ids) / len(b.main_ids)
-            return (novelty, b.quality)
-
-        best = max(remaining, key=key)
-        remaining.remove(best)
-
-        sig = frozenset(best.main_ids)
-        if sig in used_signatures:
-            continue  # duplicata exata de um look já escolhido
-        # Após já termos o mínimo desejado, exige que o núcleo traga ao menos uma
-        # peça principal nova (evita looks que só repetem peças).
-        if selected and len(selected) >= MIN_DESIRED_LOOKS:
-            if not (best.main_ids - used_ids):
-                continue
-
-        selected.append(best)
-        used_signatures.add(sig)
-        used_ids |= best.main_ids
-
-    return selected
-
-
-def _pick_complement(
-    candidates: list[dict[str, Any]],
-    used_ids: set[str],
-    base_pieces: list[dict[str, Any]],
-    band: str,
-    flags: dict[str, bool],
-    exposed: bool,
-    profile: OccasionProfile,
-    rng: random.Random,
-) -> Optional[dict[str, Any]]:
-    """
-    Escolhe UMA peça complementar (sobreposição/calçado/acessório) compatível com
-    o núcleo (formalidade + cor), preferindo peças ainda não usadas em outro look
-    e, em dia de chuva para posições expostas, as à prova de chuva.
-    """
-    viable = []
-    for c in candidates:
-        pieces = base_pieces + [c]
-        if not _look_formality_ok(pieces):
-            continue
-        if not _colors_ok(pieces, profile):
-            continue
-        viable.append(c)
-    if not viable:
-        return None
-
-    def key(c: dict[str, Any]) -> tuple[int, float]:
-        novel = 0 if c["id"] in used_ids else 1
-        pr = _piece_priority(c, band, flags, exposed, profile)
-        return (novel, pr)
-
-    rng.shuffle(viable)
-    viable.sort(key=key, reverse=True)
-    return viable[0]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Justificativa editorial (templates)
+# Interpretação da resposta (etapa 2 — validação da saída do modelo)
 # ─────────────────────────────────────────────────────────────────────────────
-# Duas formas de cada condição: uma com artigo (abre a frase) e uma nua (encadeia
-# depois de "com"). Assim ["sol", "vento"] vira "o sol com vento", e não o
-# canhestro "o sol com o vento".
-_CONDITION_MAIN: dict[str, str] = {
-    "chuva": "a chuva",
-    "frio": "o frio",
-    "vento": "o vento",
-    "nublado": "o céu fechado",
-    "sol": "o sol",
-}
-_CONDITION_BARE: dict[str, str] = {
-    "chuva": "chuva",
-    "frio": "frio",
-    "vento": "vento",
-    "nublado": "céu fechado",
-    "sol": "sol",
-}
-# Como as condições se encadeiam na frase. O ESTADO DO CÉU abre ("o sol com
-# vento", "o céu fechado com frio"), que é como se fala; os MODIFICADORES vêm
-# depois, do mais determinante para o menos. Sem céu marcado, o modificador mais
-# determinante assume a cabeça ("a chuva com vento").
-_SKY_CONDITIONS = ("sol", "nublado")
-_MODIFIER_PRIORITY = ("chuva", "frio", "vento")
-_CONDITION_PRIORITY = _SKY_CONDITIONS + _MODIFIER_PRIORITY
-
-_FORMALITY_WORD: dict[str, str] = {
-    "esporte": "esportivo",
-    "casual": "casual",
-    "smart_casual": "smart casual",
-    "social": "de rigor social",
-}
-
-
-def _condition_phrase(condicoes: list[str]) -> str:
-    """Monta a expressão do clima combinando todas as condições marcadas."""
-    joined = " ".join((c or "").strip().lower() for c in condicoes)
-    present = [c for c in _CONDITION_PRIORITY if c in joined]
-    if not present:
-        return "o dia"
-
-    head_key = next((c for c in _SKY_CONDITIONS if c in present), None)
-    if head_key is None:
-        head_key = next(c for c in _MODIFIER_PRIORITY if c in present)
-
-    # Modificadores primeiro; um segundo estado de céu (caso raro de marcar sol
-    # e nublado juntos) fecha a frase.
-    tail = [c for c in _MODIFIER_PRIORITY + _SKY_CONDITIONS if c in present and c != head_key]
-
-    head = _CONDITION_MAIN[head_key]
-    rest = [_CONDITION_BARE[c] for c in tail]
-    if not rest:
-        return head
-    if len(rest) == 1:
-        return f"{head} com {rest[0]}"
-    return f"{head} com {', '.join(rest[:-1])} e {rest[-1]}"
-
-
-def _predominant_formality(pieces: list[dict[str, Any]]) -> Optional[str]:
-    vals = [p["formalidade"] for p in pieces if p.get("formalidade")]
-    if not vals:
-        return None
-    return Counter(vals).most_common(1)[0][0]
-
-
-def _anchor_piece(pieces: list[dict[str, Any]]) -> dict[str, Any]:
-    """A peça mais 'protagonista': vestido > sobreposição > cima > primeira."""
-    order = {ROLE_DRESS: 0, ROLE_OUTER: 1, ROLE_TOP: 2, ROLE_BOTTOM: 3}
-    return min(pieces, key=lambda p: order.get(p.get("_role", ""), 9))
-
-
-def _strong_color_piece(pieces: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    for p in pieces:
-        if _color_family(p.get("cor_primaria")) != "neutro":
-            return p
-    return None
-
-
-def _compose_commentary(
-    pieces: list[dict[str, Any]],
-    weather: WeatherInfo,
-    band: str,
-    flags: dict[str, bool],
-    profile: OccasionProfile,
-    rng: random.Random,
-) -> str:
+def _structure_is_valid(
+    categories: list[str], profile: OccasionProfile
+) -> tuple[bool, str]:
     """
-    Monta uma frase curta e editorial escolhendo, entre templates elegíveis, um
-    template cujas variáveis correspondem ao que o look realmente tem.
+    Confere as regras estruturais que são da CASA, não do modelo.
+
+    O manual de estilo pede tudo isto, e o modelo obedece na esmagadora maioria
+    das vezes — mas "quase sempre" não é uma garantia que se possa mostrar ao
+    usuário. Esta função é a garantia.
+
+    Returns:
+        (válido, motivo). O motivo entra no log quando um look é descartado.
     """
-    clima = _condition_phrase(weather["condicoes"])
-    formal = _predominant_formality(pieces)
-    formal_word = _FORMALITY_WORD.get(formal or "", "")
-    anchor = _anchor_piece(pieces)
-    anchor_name = (anchor.get("name") or anchor.get("category") or "a peça").strip()
-    strong = _strong_color_piece(pieces)
-    rain_piece = next(
-        (p for p in pieces if p.get("serve_chuva") is True), None
-    )
-    has_outer = any(p.get("_role") == ROLE_OUTER for p in pieces)
-    faixa = f"{int(round(weather['temperatura_min']))}°–{int(round(weather['temperatura_max']))}°"
+    if profile.forbidden_categories and (set(categories) & profile.forbidden_categories):
+        return False, f"categoria proibida em {profile.key}"
 
-    templates: list[str] = []
+    n_dress = sum(1 for c in categories if c in DRESSES)
+    n_bottom = sum(1 for c in categories if c in BOTTOMS)
+    n_top = sum(1 for c in categories if c in TOPS)
+    n_outer = sum(1 for c in categories if c in OUTERS)
 
-    # Sempre elegíveis (usam só clima/âncora/faixa).
-    templates.append(f"Para {clima}, {anchor_name.lower()} conduz. O resto obedece.")
-    templates.append(f"{faixa}. A escolha é {anchor_name.lower()} — e nada que a contrarie.")
-    templates.append(f"{clima.capitalize()} pede clareza. Este conjunto não hesita.")
-
-    # ── Ocasião: sempre elegíveis, é a informação mais específica que temos ──
-    templates.append(f"Para {profile.phrase}, {anchor_name.lower()} resolve sem alarde.")
-    templates.append(f"{profile.label} sob {clima}: o registro não se negocia.")
-
-    if band == BAND_COLD:
-        templates.append("Frio se enfrenta em camadas, não em excesso. Aqui, cada peça tem função.")
-        templates.append(f"Contra {clima}, a lógica é agasalhar sem perder a linha.")
-    elif band == BAND_HOT:
-        templates.append("Calor não justifica descuido. Leveza com intenção.")
-        templates.append(f"Sob {clima}, menos tecido, mais precisão.")
-    else:
-        templates.append("Meia-estação premia quem sabe dosar. Este look sabe.")
-
-    if formal_word:
-        templates.append(f"Um registro {formal_word}, sustentado do começo ao fim.")
-        templates.append(f"{anchor_name} define o tom {formal_word}. O conjunto acompanha.")
-
-    if strong is not None:
-        cor = (strong.get("cor_primaria") or "").strip()
-        if cor:
-            if profile.color_discipline == COLOR_STATEMENT:
-                templates.append(f"O {cor} é o convidado de honra. O resto sustenta.")
-            templates.append(f"O {cor} é o único ponto de cor permitido — e é o suficiente.")
-            templates.append(f"Neutros ancoram, o {cor} decide. Contraste sob controle.")
-    elif profile.color_discipline == COLOR_NEUTRAL:
-        templates.append("Neutros do começo ao fim — nada aqui disputa atenção com você.")
-
-    if profile.comfort_bias >= 0.7:
-        templates.append("Horas de pé pedem leveza. Este conjunto não cobra pedágio.")
-
-    if has_outer and profile.layering_bias >= LAYERING_THRESHOLD:
-        templates.append("A camada extra não é enfeite: é o que salva a mudança de ambiente.")
-
-    if flags["rainy"] and rain_piece is not None:
-        nome = (rain_piece.get("name") or rain_piece.get("category") or "a peça").strip()
-        templates.append(f"A chuva não intimida: {nome.lower()} responde por ela.")
-        templates.append("Chuva prevista, elegância mantida — a proteção está onde importa.")
-
-    if flags["windy"] and has_outer:
-        templates.append("Vento é detalhe quando a sobreposição está resolvida.")
-
-    return rng.choice(templates)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Função pública
-# ─────────────────────────────────────────────────────────────────────────────
-def _roman(n: int) -> str:
-    numerals = ["I", "II", "III", "IV", "V", "VI"]
-    return numerals[n] if 0 <= n < len(numerals) else str(n + 1)
-
-
-def _seed_from(
-    items: list[dict[str, Any]], weather: WeatherInfo, profile: OccasionProfile
-) -> int:
-    ids = ",".join(sorted(str(i.get("id")) for i in items))
-    # As condições entram ORDENADAS: marcar "sol, vento" ou "vento, sol" é a
-    # mesma informação e deve produzir exatamente o mesmo look.
-    condicoes = ",".join(sorted((c or "").strip().lower() for c in weather["condicoes"]))
-    key = (
-        f"{ids}|{weather['temperatura_min']}|{weather['temperatura_max']}"
-        f"|{condicoes}|{profile.key}"
-    )
-    digest = hashlib.md5(key.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big")
-
-
-def _assemble_look(
-    base: _Base,
-    slots: dict[str, list[dict[str, Any]]],
-    used_complement_ids: set[str],
-    band: str,
-    flags: dict[str, bool],
-    profile: OccasionProfile,
-    rng: random.Random,
-) -> list[dict[str, Any]]:
-    """Expande um núcleo com sobreposição/calçado/acessório compatíveis."""
-    # Peças do núcleo, anotadas com o papel (para a justificativa e a saída).
-    pieces: list[dict[str, Any]] = []
-    for p, role in base.mains:
-        pc = dict(p)
-        pc["_role"] = role
-        pieces.append(pc)
-
-    # A sobreposição pode ser pedida pelo CLIMA (frio/chuva/vento) ou pela
-    # OCASIÃO (blazer de reunião, casaco de avião, camada de sala com ar), de
-    # forma independente — daí o `or` com o viés de camada.
-    wants_outer = (
-        band == BAND_COLD
-        or flags["cold_signal"]
-        or flags["rainy"]
-        or flags["windy"]
-        or profile.layering_bias >= LAYERING_THRESHOLD
-    )
-    wants_scarf = band == BAND_COLD or flags["cold_signal"]
-
-    # Sobreposição (quando o clima ou a ocasião pede e há peça compatível).
-    if wants_outer and slots["outers"]:
-        outer = _pick_complement(
-            slots["outers"], used_complement_ids, pieces, band, flags,
-            True, profile, rng,
-        )
-        if outer is not None:
-            oc = dict(outer)
-            oc["_role"] = ROLE_OUTER
-            pieces.append(oc)
-
-    # Calçado (parte de um look completo; opcional se o guarda-roupa não tiver).
-    if slots["footwear"]:
-        shoe = _pick_complement(
-            slots["footwear"], used_complement_ids, pieces, band, flags,
-            True, profile, rng,
-        )
-        if shoe is not None:
-            sc = dict(shoe)
-            sc["_role"] = ROLE_FOOTWEAR
-            pieces.append(sc)
-
-    # Cachecol (frio) e/ou um acessório (opcional), no máximo um de cada.
-    if wants_scarf and slots["scarves"]:
-        scarf = _pick_complement(
-            slots["scarves"], used_complement_ids, pieces, band, flags,
-            False, profile, rng,
-        )
-        if scarf is not None:
-            fc = dict(scarf)
-            fc["_role"] = ROLE_SCARF
-            pieces.append(fc)
-
-    # Acessório extra: algumas ocasiões dispensam (mãos ocupadas no shopping,
-    # ruído visual na entrevista, bagagem na viagem).
-    if profile.wants_accessory and slots["accessories"]:
-        acc = _pick_complement(
-            slots["accessories"], used_complement_ids, pieces, band, flags,
-            False, profile, rng,
-        )
-        if acc is not None:
-            ac = dict(acc)
-            ac["_role"] = ROLE_ACCESSORY
-            pieces.append(ac)
-
-    return pieces
-
-
-def _look_structure_is_valid(
-    pieces: list[dict[str, Any]], profile: Optional[OccasionProfile] = None
-) -> bool:
-    """
-    Rede de segurança estrutural (defesa em profundidade): valida um look montado
-    contra as regras invioláveis, olhando SOMENTE a `category` de cada peça.
-
-    Regras:
-      - Um vestido é peça única: não pode coexistir com peça de baixo (calça/saia)
-        nem com peça de cima (camisa/malha), e nunca há dois vestidos.
-      - Sem vestido, há no máximo UMA peça de baixo (calça e saia são ambas peça
-        de baixo — nunca duas no mesmo look).
-      - Quando há ocasião, nenhuma peça pode ser de categoria proibida por ela
-        (nenhum blazer na academia) — a proibição é inviolável e não relaxa.
-
-    Não reclassifica imagem nem conserta categoria errada: apenas garante que,
-    dadas as categorias, a composição jamais viole a estrutura. Por construção os
-    looks já saem válidos; este cheque protege contra regressões da montagem e
-    torna a invariante testável de forma automatizada.
-    """
-    cats = [p.get("category") for p in pieces]
-
-    if profile is not None and profile.forbidden_categories:
-        if any(c in profile.forbidden_categories for c in cats):
-            return False
-
-    n_bottom = sum(1 for c in cats if c in BOTTOMS)
-    n_top = sum(1 for c in cats if c in TOPS)
-    n_dress = sum(1 for c in cats if c in DRESSES)
+    if n_outer > 1:
+        return False, "mais de uma sobreposição"
 
     if n_dress:
-        return n_dress == 1 and n_bottom == 0 and n_top == 0
-    return n_bottom <= 1
+        if n_dress > 1:
+            return False, "mais de uma peça única"
+        if n_bottom or n_top:
+            return False, "peça única acompanhada de peça de baixo ou de cima"
+        return True, ""
+
+    if n_bottom != 1 or n_top != 1:
+        return False, f"núcleo inválido ({n_bottom} de baixo, {n_top} de cima)"
+    return True, ""
 
 
+def _parse_reply(
+    text: str, by_id: dict[str, dict[str, Any]], profile: OccasionProfile
+) -> tuple[list[SuggestedLook], Optional[str]]:
+    """
+    Interpreta a resposta da API e a valida contra o subconjunto que foi enviado.
+
+    A tolerância aqui é deliberadamente estreita. `output_config.format` já faz a
+    API garantir JSON bem formado no formato certo, então uma resposta que não
+    passe daqui indica algo de fato errado — e a resposta certa a isso é nova
+    tentativa, não adivinhação. Extrair JSON de um texto com prosa em volta
+    mascararia o problema e um dia entregaria um look montado a partir de um
+    fragmento.
+
+    Args:
+        text: corpo bruto devolvido pelo modelo.
+        by_id: subconjunto ENVIADO, indexado por id. É contra ele que os ids da
+            resposta são conferidos — um id de fora significa peça inventada.
+        profile: perfil da ocasião, para reconferir as categorias proibidas.
+
+    Returns:
+        (looks válidos, nota do modelo). Os rótulos são reatribuídos por posição.
+
+    Raises:
+        LookParseError: JSON malformado, prosa fora do JSON, id inexistente,
+            papel desconhecido, ou nenhum look estruturalmente válido.
+    """
+    try:
+        payload = json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise LookParseError(f"resposta não é JSON válido: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise LookParseError("resposta não é um objeto JSON")
+
+    raw_looks = payload.get("looks")
+    if not isinstance(raw_looks, list) or not raw_looks:
+        raise LookParseError("resposta sem a lista 'looks'")
+
+    note = payload.get("note")
+    if note is not None and not isinstance(note, str):
+        note = None
+
+    looks: list[SuggestedLook] = []
+    for raw in raw_looks[:MAX_LOOKS]:
+        if not isinstance(raw, dict):
+            raise LookParseError("entrada de look que não é um objeto")
+
+        raw_items = raw.get("items")
+        commentary = raw.get("commentary")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise LookParseError("look sem peças")
+        if not isinstance(commentary, str) or not commentary.strip():
+            raise LookParseError("look sem justificativa")
+
+        items: list[SuggestedLookItem] = []
+        categories: list[str] = []
+        seen: set[str] = set()
+        duplicated = False
+
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                raise LookParseError("peça que não é um objeto")
+            item_id = entry.get("item_id")
+            role = entry.get("role")
+
+            if not isinstance(item_id, str) or item_id not in by_id:
+                raise LookParseError(f"id de peça fora do subconjunto: {item_id!r}")
+            if role not in VALID_ROLES:
+                raise LookParseError(f"papel desconhecido: {role!r}")
+
+            category = str(by_id[item_id].get("category"))
+            if category not in _ROLE_CATEGORIES[role]:
+                raise LookParseError(
+                    f"peça de categoria {category!r} declarada como {role!r}"
+                )
+
+            if item_id in seen:
+                duplicated = True
+                break
+            seen.add(item_id)
+
+            items.append(SuggestedLookItem(item_id=item_id, role=role))
+            categories.append(category)
+
+        if duplicated:
+            logger.warning("Look descartado: peça repetida dentro do mesmo look.")
+            continue
+
+        ok, reason = _structure_is_valid(categories, profile)
+        if not ok:
+            logger.warning("Look descartado (%s) — categorias: %s", reason, categories)
+            continue
+
+        looks.append(
+            SuggestedLook(
+                # O rótulo do modelo é conferido, não confiado: dois "I" ou um
+                # salto para "III" sairiam errados na tela. A posição manda.
+                label=LOOK_LABELS[len(looks)],
+                items=items,
+                commentary=commentary.strip(),
+            )
+        )
+
+    if not looks:
+        raise LookParseError("nenhum look estruturalmente válido na resposta")
+
+    return looks, note
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ponto de entrada
+# ─────────────────────────────────────────────────────────────────────────────
 def generate_daily_look(
     items: list[dict[str, Any]],
     weather: WeatherInfo,
     ocasiao: Optional[str] = None,
+    recent_item_ids: Optional[list[list[str]]] = None,
 ) -> DailyLookResult:
     """
-    Gera de 2 a 3 sugestões de look para o dia, de forma determinística.
+    Gera de 2 a 3 sugestões de look para o dia.
 
     Args:
         items: peças do usuário (cada uma como dict com id e atributos de moda).
         weather: mínima, máxima e a LISTA de condições climáticas do dia.
         ocasiao: para o que a pessoa precisa do look (chave de `Ocasiao`).
             Ausente ou desconhecida cai em `dia_a_dia`, o registro mais elástico.
+        recent_item_ids: núcleos dos looks recentes, para o modelo não repetir a
+            combinação que acabou de sugerir. Cada entrada é uma lista de ids.
 
     Returns:
-        DailyLookResult com a lista de looks (cada um com peças+papéis e uma
-        justificativa) e uma nota opcional quando o guarda-roupa está limitado.
-        Nunca lança por falta de peças — degrada graciosamente.
+        DailyLookResult. NUNCA lança: toda falha vira `looks: []` mais uma
+        `note` explicativa, e `unavailable=True` quando a falha foi nossa.
     """
     profile = get_profile(ocasiao)
-    rng = random.Random(_seed_from(items, weather, profile))
-    temp_ref = _reference_temp(weather)
-    band = _band_for(temp_ref)
-    flags = _condition_flags(weather["condicoes"])
-
+    band = _band_for(_reference_temp(weather))
     notes: list[str] = []
 
-    # ── Etapa 1: pré-filtros ────────────────────────────────────────────────
-    # A proibição da ocasião é aplicada primeiro e NUNCA é desfeita.
+    # ── Etapa 1: pré-filtro (gratuito) ──────────────────────────────────────
     allowed = _drop_forbidden(items, profile)
     n_forbidden = len(items) - len(allowed)
-
     thermal = _thermal_prefilter(allowed, band)
 
-    # Cascata de relaxação, do mais restrito ao mais permissivo. Cada degrau
-    # cede exatamente uma restrição e explica o que cedeu. A ordem — soltar o
-    # REGISTRO antes do CLIMA — é deliberada: estar mal-vestida para a ocasião
-    # é constrangedor, estar mal-vestida para o frio é insalubre.
-    attempts: list[tuple[list[dict[str, Any]], Optional[str]]] = [
-        (_register_filter(thermal, profile), None),
-        (
-            thermal,
-            f"O guarda-roupa não tem peças no registro de {profile.label.lower()}; "
-            "compus com o que havia, respeitando o clima.",
-        ),
-        (
-            _register_filter(allowed, profile),
+    # Uma única relaxação: se o corte térmico não deixa nem um núcleo possível,
+    # é melhor vestir a pessoa com o que ela tem e avisar do descompasso do que
+    # devolver a tela vazia. A proibição da ocasião NÃO participa disso.
+    if _have_core(_partition(thermal)):
+        selection = thermal
+    elif _have_core(_partition(allowed)):
+        selection = allowed
+        notes.append(
             "Poucas peças combinam com esta temperatura; ampliei a seleção para "
-            f"manter o registro de {profile.label.lower()}.",
-        ),
-        (
-            allowed,
-            f"Nem o clima nem o registro de {profile.label.lower()} puderam ser "
-            "plenamente respeitados — esta é a melhor composição possível com o "
-            "guarda-roupa atual.",
-        ),
-    ]
-
-    slots: Optional[dict[str, list[dict[str, Any]]]] = None
-    for candidate, note in attempts:
-        partitioned = _partition(candidate)
-        if _have_core(partitioned):
-            slots = partitioned
-            if note:
-                notes.append(note)
-            break
-
-    if slots is None:
-        # Impossível montar um look completo. Degrada com uma nota clara,
-        # distinguindo "faltam peças" de "a ocasião exclui o que você tem".
+            "conseguir compor."
+        )
+    else:
         if n_forbidden:
             note = (
                 f"Nenhuma peça do guarda-roupa serve para {profile.phrase}: "
@@ -989,59 +435,67 @@ def generate_daily_look(
                 "Cadastre ao menos uma parte de baixo e uma de cima — ou um "
                 "vestido — para a Miranda trabalhar."
             )
-        return DailyLookResult(looks=[], note=note)
+        # Guarda-roupa insuficiente NÃO é indisponibilidade: é uma resposta
+        # legítima sobre o acervo. E não gasta uma chamada paga.
+        return DailyLookResult(looks=[], note=note, unavailable=False)
 
-    # ── Etapa 2: composição ─────────────────────────────────────────────────
-    bases, relaxed = _build_bases(slots, band, flags, profile, rng)
-    if relaxed:
-        notes.append(
-            "As combinações possíveis misturam registros diferentes; priorizei "
-            "o que o guarda-roupa permite."
-        )
+    # ── Etapa 2: composição (chamada paga) ──────────────────────────────────
+    by_id = {str(p["id"]): p for p in selection}
+    user_message = build_user_message(
+        selection, dict(weather), profile.label, recent_item_ids or []
+    )
 
-    selected = _select_varied(bases)
+    max_attempts = max(1, settings.ANTHROPIC_MAX_ATTEMPTS)
+    last_error: Optional[Exception] = None
 
-    looks: list[SuggestedLook] = []
-    used_complement_ids: set[str] = set()
-    for base in selected:
-        pieces = _assemble_look(
-            base, slots, used_complement_ids, band, flags, profile, rng
-        )
-
-        # Rede de segurança: descarta um look que viole a estrutura ou a
-        # proibição da ocasião (nunca deveria acontecer por construção — se
-        # acontecer, sinaliza bug de montagem).
-        if not _look_structure_is_valid(pieces, profile):
-            logger.warning(
-                "Look inválido descartado (categorias: %s, ocasião: %s) — "
-                "verifique a lógica de montagem.",
-                [p.get("category") for p in pieces],
-                profile.key,
+    for attempt in range(1, max_attempts + 1):
+        try:
+            reply = claude_client.request_composition(
+                MIRANDA_SYSTEM_PROMPT, user_message, LOOK_RESPONSE_SCHEMA
             )
+            looks, model_note = _parse_reply(reply.text, by_id, profile)
+
+        except LookApiFatal as exc:
+            # Chave inválida ou requisição recusada não melhoram na tentativa
+            # seguinte — e cada tentativa custa. Desiste na hora.
+            logger.error("Composição indisponível (falha definitiva): %s", exc)
+            return DailyLookResult(
+                looks=[], note=_UNAVAILABLE_NOTE, unavailable=True
+            )
+
+        except (LookApiTransient, LookParseError) as exc:
+            # Interpretação falha entra no mesmo laço que o 429 de propósito:
+            # uma resposta ilegível é tão retentável quanto uma rede instável, e
+            # separá-las daria dois laços com a mesma forma.
+            last_error = exc
+            logger.warning(
+                "Tentativa %d/%d de composição falhou: %s", attempt, max_attempts, exc
+            )
+            if attempt < max_attempts:
+                time.sleep(
+                    RETRY_BACKOFF_SECONDS[
+                        min(attempt - 1, len(RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                )
             continue
 
-        # Marca complementos como usados para dar variedade entre os looks.
-        for p in pieces:
-            if p.get("_role") in (ROLE_OUTER, ROLE_FOOTWEAR, ROLE_SCARF, ROLE_ACCESSORY):
-                used_complement_ids.add(p["id"])
-
-        commentary = _compose_commentary(pieces, weather, band, flags, profile, rng)
-        looks.append(
-            SuggestedLook(
-                label=_roman(len(looks)),  # numeração romana só dos looks válidos
-                items=[
-                    SuggestedLookItem(item_id=str(p["id"]), role=p["_role"])
-                    for p in pieces
-                ],
-                commentary=commentary,
+        except Exception as exc:  # noqa: BLE001
+            # Rede de segurança final. O contrato da rota é HTTP 200 sempre, e
+            # um erro que ninguém previu não pode ser o que quebra isso.
+            logger.exception("Erro inesperado ao compor o look: %s", exc)
+            return DailyLookResult(
+                looks=[], note=_UNAVAILABLE_NOTE, unavailable=True
             )
+
+        if model_note:
+            notes.append(model_note)
+        return DailyLookResult(
+            looks=looks, note=" ".join(notes) if notes else None, unavailable=False
         )
 
-    if len(looks) < MIN_DESIRED_LOOKS:
-        notes.append(
-            "O guarda-roupa ainda é enxuto para este clima — cadastre mais peças "
-            "para receber opções variadas."
-        )
-
-    note = " ".join(notes) if notes else None
-    return DailyLookResult(looks=looks, note=note)
+    logger.error(
+        "Composição indisponível após %d tentativas. Última falha: %s",
+        max_attempts,
+        last_error,
+    )
+    return DailyLookResult(looks=[], note=_UNAVAILABLE_NOTE, unavailable=True)
