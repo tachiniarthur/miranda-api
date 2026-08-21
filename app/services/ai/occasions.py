@@ -33,7 +33,7 @@ As duas restrições têm forças diferentes de propósito:
 
   · `forbidden_categories` é INVIOLÁVEL. Nunca é relaxada, nem em guarda-roupa
     pobre — é preferível não montar um look de academia a sugerir um blazer.
-    A rede de segurança em `_look_structure_is_valid` reconfere isso na saída.
+    A rede de segurança em `_structure_is_valid` reconfere isso na saída da API.
   · `formality_target` é uma PREFERÊNCIA FORTE. Se o guarda-roupa não tem o
     registro pedido, a composição relaxa e devolve o melhor possível junto de
     uma nota explicando o que faltou — a mesma degradação graciosa que o
