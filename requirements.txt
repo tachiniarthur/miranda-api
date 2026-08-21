@@ -19,6 +19,11 @@ bcrypt==4.2.1
 # ── Upload de arquivos (multipart/form-data) ─────────────────────────
 python-multipart==0.0.20
 
+# ── Rate limiting das rotas de autenticação ──────────────────────────
+# Armazenamento em memória do processo por padrão. Com mais de um worker,
+# configurar storage_uri="redis://..." em app/core/rate_limit.py.
+slowapi==0.1.10
+
 # ── IA self-hosted (análise de peça) — SEM nenhuma API paga ───────────
 # FashionCLIP (via transformers + torch), k-means (scikit-learn) e cor (Pillow).
 # IMPORTANTE: instale a variante CPU-only do torch para NÃO baixar dependências

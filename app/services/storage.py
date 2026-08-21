@@ -17,17 +17,14 @@ from typing import Protocol
 from fastapi import UploadFile
 
 from app.core.config import settings
+from app.services.image_validation import (
+    ImageValidationError,
+    read_and_validate_upload,
+)
 
-# Extensões de imagem aceitas → extensão canônica salva em disco.
-_ALLOWED_CONTENT_TYPES = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-}
-
-# Tamanho máximo do arquivo (8 MB). Evita que uploads gigantes estourem o disco.
-_MAX_FILE_BYTES = 8 * 1024 * 1024
+# As regras de tipo/tamanho/dimensão vivem em app/services/image_validation.py,
+# compartilhadas com a rota /analyze — que não passa por aqui e antes ficava sem
+# nenhuma delas.
 
 
 class StorageError(Exception):
@@ -45,32 +42,26 @@ class ImageStorage(Protocol):
         """Remove o arquivo associado a `image_path` (idempotente)."""
         ...
 
-    def url_for(self, image_path: str) -> str:
-        """Retorna a URL pública absoluta para `image_path`."""
+    def path_for(self, image_path: str) -> Path:
+        """Retorna o caminho físico do arquivo de `image_path`."""
         ...
 
 
 class LocalImageStorage:
     """Implementação que grava os arquivos no disco local do servidor."""
 
-    def __init__(self, base_dir: str, url_prefix: str, public_base_url: str) -> None:
+    def __init__(self, base_dir: str) -> None:
         self._base_dir = Path(base_dir)
-        self._url_prefix = url_prefix.rstrip("/")
-        self._public_base_url = public_base_url.rstrip("/")
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
     async def save(self, file: UploadFile) -> str:
-        ext = _ALLOWED_CONTENT_TYPES.get((file.content_type or "").lower())
-        if ext is None:
-            raise StorageError(
-                "Formato de imagem não suportado. Envie PNG, JPEG ou WebP."
-            )
-
-        contents = await file.read()
-        if len(contents) == 0:
-            raise StorageError("Arquivo de imagem vazio.")
-        if len(contents) > _MAX_FILE_BYTES:
-            raise StorageError("Imagem muito grande (máximo 8 MB).")
+        try:
+            contents, ext = await read_and_validate_upload(file)
+        except ImageValidationError as exc:
+            # Preserva o contrato desta camada: quem chama `save` trata
+            # StorageError. A extensão vem do formato REAL detectado no
+            # cabeçalho, não do Content-Type informado pelo cliente.
+            raise StorageError(exc.message) from exc
 
         filename = f"{uuid.uuid4().hex}{ext}"
         destination = self._base_dir / filename
@@ -88,14 +79,26 @@ class LocalImageStorage:
             # Falha ao remover o arquivo não deve impedir a exclusão do registro.
             pass
 
-    def url_for(self, image_path: str) -> str:
-        return f"{self._public_base_url}{self._url_prefix}/{image_path}"
+    def path_for(self, image_path: str) -> Path:
+        # `Path(...).name` descarta qualquer diretório embutido em image_path:
+        # mesmo que um valor malformado chegue ao banco, ele não escapa da pasta
+        # de storage.
+        return self._base_dir / Path(image_path).name
 
 
 # Instância única usada pela aplicação. Trocar esta linha (e nada mais) é o
 # suficiente para migrar de storage local para nuvem no futuro.
-image_storage: ImageStorage = LocalImageStorage(
-    base_dir=settings.STORAGE_DIR,
-    url_prefix=settings.STORAGE_URL_PREFIX,
-    public_base_url=settings.PUBLIC_BASE_URL,
-)
+image_storage: ImageStorage = LocalImageStorage(base_dir=settings.STORAGE_DIR)
+
+
+def authenticated_image_url(item_id) -> str:
+    """
+    URL pública da imagem de uma peça.
+
+    Aponta para a rota AUTENTICADA `/api/wardrobe/items/{id}/image`, que confere
+    a posse antes de devolver o arquivo. Antes, as imagens eram servidas por um
+    mount estático sem autenticação: o nome do arquivo era um uuid4 (não
+    adivinhável), mas a URL, uma vez vazada — histórico do navegador, header
+    Referer, um print compartilhado —, dava acesso permanente e a qualquer um.
+    """
+    return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/wardrobe/items/{item_id}/image"

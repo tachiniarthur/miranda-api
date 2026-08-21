@@ -63,7 +63,7 @@ class ClothingItemPublic(BaseModel):
     category: ClothingCategory
     image_path: str
     # URL absoluta para o frontend carregar a imagem. Não existe como coluna no
-    # banco: é preenchida pela camada de rotas via storage.url_for(). O default
+    # banco: é preenchida pela camada de rotas via authenticated_image_url(). O default
     # "" permite `model_validate(orm_item)` sem o atributo presente no ORM.
     image_url: str = ""
     cor_primaria: str | None

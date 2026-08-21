@@ -97,6 +97,12 @@ def is_available() -> bool:
 def _to_pil(image: "str | bytes | Image.Image") -> "Image.Image":
     from PIL import Image
 
+    from app.services.image_validation import apply_pillow_limits
+
+    # Teto de pixels também aqui: este caminho é alcançável fora do HTTP
+    # (scripts, testes), onde a validação da rota não roda.
+    apply_pillow_limits()
+
     if isinstance(image, Image.Image):
         pil = image
     elif isinstance(image, (bytes, bytearray)):

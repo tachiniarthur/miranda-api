@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -25,7 +26,15 @@ from app.schemas.clothing_item import (
 )
 from app.services import wardrobe_service
 from app.services.ai import NotClothingError, analyze_clothing_item_detailed
-from app.services.storage import StorageError, image_storage
+from app.services.image_validation import (
+    ImageValidationError,
+    read_and_validate_upload,
+)
+from app.services.storage import (
+    StorageError,
+    authenticated_image_url,
+    image_storage,
+)
 from app.services.wardrobe_service import WardrobeError
 
 router = APIRouter(prefix="/wardrobe/items", tags=["wardrobe"])
@@ -39,11 +48,22 @@ def _none_if_blank(value: str | None) -> str | None:
     return value or None
 
 
+# Extensão do arquivo → media type devolvido pela rota de imagem. A extensão
+# vem do formato REAL detectado no upload (ver image_validation.py), então não
+# há como o cliente induzir um media type que não corresponda ao conteúdo.
+_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
 def _to_public(item) -> ClothingItemPublic:
     """Serializa uma peça incluindo a URL absoluta da imagem."""
     # `image_url` não é uma coluna do ORM; anexamos como atributo transiente
     # na instância para que o model_validate (from_attributes) o encontre.
-    item.image_url = image_storage.url_for(item.image_path)
+    item.image_url = authenticated_image_url(item.id)
     return ClothingItemPublic.model_validate(item)
 
 
@@ -74,6 +94,49 @@ def get_item(
     except WardrobeError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
     return _to_public(item)
+
+
+@router.get("/{item_id}/image")
+def get_item_image(
+    item_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """
+    Devolve o arquivo de imagem da peça, conferindo a posse antes.
+
+    Substitui o mount estático `/static/clothing_images`, que servia QUALQUER
+    imagem a QUALQUER pessoa que tivesse a URL, sem autenticação. O nome do
+    arquivo é um uuid4 e portanto não é adivinhável, mas isso é segurança por
+    obscuridade: bastava a URL vazar uma vez — no histórico do navegador, num
+    header Referer, num print — para o acesso virar permanente e irrevogável.
+
+    Aqui a peça é resolvida por `get_item`, a mesma função usada pelas rotas de
+    leitura/edição/exclusão, que responde 404 quando a peça é de outro usuário.
+    """
+    try:
+        item = wardrobe_service.get_item(
+            db, user_id=current_user.id, item_id=item_id
+        )
+    except WardrobeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    path = image_storage.path_for(item.image_path)
+    if not path.is_file():
+        # Registro no banco sem arquivo em disco: trata como peça sem imagem em
+        # vez de vazar detalhe do sistema de arquivos.
+        raise HTTPException(status_code=404, detail="Imagem não encontrada.")
+
+    return FileResponse(
+        path,
+        media_type=_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+        headers={
+            # `private`: pode ficar no cache do navegador do dono, nunca em um
+            # cache compartilhado (proxy/CDN), já que o conteúdo é por usuário.
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition": "inline",
+        },
+    )
 
 
 @router.post("", response_model=ClothingItemPublic, status_code=201)
@@ -134,10 +197,16 @@ async def analyze_item(
     Reprova a imagem (422, code "not_clothing") apenas quando o portão de
     validação conclui que ela claramente não é uma peça de roupa. Qualquer outra
     incerteza vira campos nulos, nunca um erro.
+
+    O arquivo passa pela MESMA validação de tipo, tamanho e dimensões da rota de
+    criação (app/services/image_validation.py) antes de qualquer processamento:
+    esta rota entrega os bytes ao Pillow e ao FashionCLIP, então deixá-la sem
+    teto significaria decodificar em memória o que o cliente quisesse mandar.
     """
-    contents = await image.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Arquivo de imagem vazio.")
+    try:
+        contents, _ext = await read_and_validate_upload(image)
+    except ImageValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
     try:
         result = analyze_clothing_item_detailed(contents)

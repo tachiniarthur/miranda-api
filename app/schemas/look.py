@@ -3,9 +3,9 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import ClothingCategory
+from app.models.enums import ClothingCategory, CondicaoClimatica, Ocasiao
 
 
 class GenerateLookRequest(BaseModel):
@@ -13,8 +13,27 @@ class GenerateLookRequest(BaseModel):
 
     temperatura_min: float = Field(ge=-30, le=60)
     temperatura_max: float = Field(ge=-30, le=60)
-    # Condição climática livre (ex.: "sol", "nublado", "chuva", "vento", "frio").
-    condicao_climatica: str = Field(min_length=1, max_length=60)
+
+    # Condições COMBINÁVEIS: o usuário marca quantas quiser (sol com vento,
+    # chuva com frio...). Ao menos uma é exigida — sem nenhuma, a composição
+    # perderia o único sinal qualitativo do dia.
+    condicoes_climaticas: list[CondicaoClimatica] = Field(min_length=1)
+
+    # Para o que a pessoa precisa do look. Única por geração: um look não serve
+    # a dois registros ao mesmo tempo.
+    ocasiao: Ocasiao
+
+    @field_validator("condicoes_climaticas")
+    @classmethod
+    def _dedupe(cls, v: list[CondicaoClimatica]) -> list[CondicaoClimatica]:
+        """Remove repetições preservando a ordem em que foram marcadas."""
+        seen: set[str] = set()
+        unique: list[CondicaoClimatica] = []
+        for c in v:
+            if c.value not in seen:
+                seen.add(c.value)
+                unique.append(c)
+        return unique
 
 
 class LookItemPublic(BaseModel):
@@ -43,11 +62,13 @@ class LookSuggestionPublic(BaseModel):
 class GenerateLookResponse(BaseModel):
     """Resposta da geração de look (composição determinística por regras)."""
 
-    condicao_climatica: str
+    condicoes_climaticas: list[CondicaoClimatica]
+    ocasiao: Ocasiao
     temperatura_min: float
     temperatura_max: float
     looks: list[LookSuggestionPublic]
-    # Nota opcional quando o guarda-roupa está limitado para o clima informado.
+    # Nota opcional quando o guarda-roupa está limitado para o clima ou para a
+    # ocasião informada.
     note: str | None = None
 
 
@@ -60,6 +81,7 @@ class LookHistoryPublic(BaseModel):
     temperatura_min: float | None
     temperatura_max: float | None
     condicao_climatica: str | None
+    ocasiao: str | None
     itens_sugeridos: dict | list | None
     justificativa: str | None
     created_at: datetime

@@ -30,7 +30,17 @@ class LookHistory(UUIDPrimaryKeyMixin, Base):
     )
     temperatura_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     temperatura_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # As condições são múltiplas e ficam gravadas aqui JUNTAS, separadas por
+    # ", " (ex.: "sol, vento"). Uma coluna de texto basta: o histórico é lido
+    # para auditoria/exibição, nunca filtrado por condição individual. Se um dia
+    # for preciso consultar por condição, migrar para JSONB.
     condicao_climatica: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+    # Ocasião como TEXTO, não como ENUM do Postgres, de propósito: a lista de
+    # ocasiões é um parâmetro de produto que deve poder crescer sem ALTER TYPE,
+    # e registros antigos com uma ocasião descontinuada continuam legíveis.
+    ocasiao: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     # Lista de uuids de clothing_items sugeridos, armazenada como JSONB para
     # flexibilidade (pode conter múltiplos looks, cada um com seus itens).

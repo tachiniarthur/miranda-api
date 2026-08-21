@@ -24,7 +24,7 @@ from app.schemas.look import (
     LookSuggestionPublic,
 )
 from app.services.ai.look_generation import generate_daily_look
-from app.services.storage import image_storage
+from app.services.storage import authenticated_image_url
 from app.services.wardrobe_service import list_items
 
 
@@ -66,13 +66,18 @@ def generate_look(
     """
     items = list_items(db, user_id=user_id)
     items_payload = [_item_to_payload(i) for i in items]
+    condicoes = [c.value for c in payload.condicoes_climaticas]
     weather = {
         "temperatura_min": payload.temperatura_min,
         "temperatura_max": payload.temperatura_max,
-        "condicao_climatica": payload.condicao_climatica,
+        "condicoes": condicoes,
     }
 
-    result = generate_daily_look(items_payload, weather)  # type: ignore[arg-type]
+    result = generate_daily_look(
+        items_payload,  # type: ignore[arg-type]
+        weather,  # type: ignore[arg-type]
+        ocasiao=payload.ocasiao.value,
+    )
 
     # Índice id → peça ORM para resolver os dados de renderização.
     by_id: dict[str, ClothingItem] = {str(i.id): i for i in items}
@@ -94,7 +99,7 @@ def generate_look(
                     role=entry["role"],
                     name=item.name,
                     category=item.category,
-                    image_url=image_storage.url_for(item.image_path),
+                    image_url=authenticated_image_url(item.id),
                     cor_primaria=item.cor_primaria,
                 )
             )
@@ -128,7 +133,9 @@ def generate_look(
         user_id=user_id,
         temperatura_min=payload.temperatura_min,
         temperatura_max=payload.temperatura_max,
-        condicao_climatica=payload.condicao_climatica,
+        # Condições múltiplas gravadas juntas (ver nota na coluna do modelo).
+        condicao_climatica=", ".join(condicoes),
+        ocasiao=payload.ocasiao.value,
         itens_sugeridos={"looks": persisted_looks, "note": result.get("note")},
         justificativa=justificativa or None,
     )
@@ -136,7 +143,8 @@ def generate_look(
     db.commit()
 
     return GenerateLookResponse(
-        condicao_climatica=payload.condicao_climatica,
+        condicoes_climaticas=payload.condicoes_climaticas,
+        ocasiao=payload.ocasiao,
         temperatura_min=payload.temperatura_min,
         temperatura_max=payload.temperatura_max,
         looks=looks_public,

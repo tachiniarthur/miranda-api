@@ -83,10 +83,14 @@ def seed(db, user_id):
     print(f"Semeadas {len(DEMO)} peças de demonstração.")
 
 
-def run_scenario(db, user_id, label, tmin, tmax, cond):
-    print(f"\n{'='*66}\n{label}  ({tmin}°–{tmax}°, {cond})\n{'='*66}")
+def run_scenario(db, user_id, label, tmin, tmax, conds, ocasiao):
+    cond_txt = " + ".join(conds)
+    print(f"\n{'='*66}\n{label}  ({tmin}°–{tmax}°, {cond_txt} · {ocasiao})\n{'='*66}")
     payload = GenerateLookRequest(
-        temperatura_min=tmin, temperatura_max=tmax, condicao_climatica=cond
+        temperatura_min=tmin,
+        temperatura_max=tmax,
+        condicoes_climaticas=conds,
+        ocasiao=ocasiao,
     )
     resp = look_service.generate_look(db, user_id=user_id, payload=payload)
     if resp.note:
@@ -115,8 +119,24 @@ def main():
         ).all()
         print(f"\nlooks_history antes: {len(before)} registro(s).")
 
-        run_scenario(db, user.id, "CENÁRIO A — quente e ensolarado", 24, 33, "sol")
-        run_scenario(db, user.id, "CENÁRIO B — frio e chuvoso", 6, 12, "chuva")
+        # Os cenários variam clima E ocasião, e incluem condições combinadas —
+        # o ponto é ver o MESMO guarda-roupa responder diferente a cada pedido.
+        run_scenario(
+            db, user.id, "CENÁRIO A — quente e ensolarado, dia a dia",
+            24, 33, ["sol"], "dia_a_dia",
+        )
+        run_scenario(
+            db, user.id, "CENÁRIO B — frio com chuva e vento, reunião",
+            6, 12, ["chuva", "vento", "frio"], "reuniao",
+        )
+        run_scenario(
+            db, user.id, "CENÁRIO C — ameno e nublado, jantar romântico",
+            17, 23, ["nublado"], "jantar_romantico",
+        )
+        run_scenario(
+            db, user.id, "CENÁRIO D — mesmo clima do C, mas para o esporte",
+            17, 23, ["nublado"], "esporte",
+        )
 
         after = db.scalars(
             select(LookHistory)
@@ -124,10 +144,11 @@ def main():
             .order_by(LookHistory.created_at.desc())
         ).all()
         print(f"\n{'='*66}\nlooks_history depois: {len(after)} registro(s).")
-        for h in after[:2]:
+        for h in after[:4]:
             n_looks = len((h.itens_sugeridos or {}).get("looks", []))
             print(
-                f"  • {h.condicao_climatica} {h.temperatura_min}°–{h.temperatura_max}° "
+                f"  • [{h.ocasiao}] {h.condicao_climatica} "
+                f"{h.temperatura_min}°–{h.temperatura_max}° "
                 f"→ {n_looks} look(s) | justificativa: "
                 f"{(h.justificativa or '')[:60].replace(chr(10), ' ')}…"
             )

@@ -1,12 +1,28 @@
 """Schemas Pydantic do domínio de autenticação."""
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.core.common_passwords import COMMON_PASSWORD_MESSAGE, is_common_password
+
+
+def _reject_common_password(value: str) -> str:
+    """
+    Validator compartilhado pelo cadastro e pela troca de senha.
+
+    O `min_length=8` garante tamanho, não imprevisibilidade: "senha123" passa no
+    comprimento e é dos primeiros palpites de qualquer ataque de dicionário.
+    """
+    if is_common_password(value):
+        raise ValueError(COMMON_PASSWORD_MESSAGE)
+    return value
 
 
 class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+
+    _no_common_password = field_validator("password")(_reject_common_password)
 
 
 class LoginRequest(BaseModel):
@@ -24,17 +40,18 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class ForgotPasswordResponse(BaseModel):
+    # Resposta deliberadamente sem nenhum campo variável: só a mensagem
+    # genérica. O token de redefinição NÃO trafega por aqui (ver a rota), e
+    # qualquer campo que só aparecesse para e-mails existentes recriaria o
+    # oráculo de enumeração que a mensagem genérica existe para fechar.
     message: str
-    # ATENÇÃO: em produção o token NÃO deve ser retornado na resposta — ele
-    # deve ser enviado por e-mail. Ele é exposto aqui apenas para permitir
-    # testar o fluxo localmente sem um servidor de e-mail. Ver comentário na
-    # rota correspondente.
-    reset_token: str | None = None
 
 
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str = Field(min_length=8, max_length=128)
+
+    _no_common_password = field_validator("new_password")(_reject_common_password)
 
 
 class MessageResponse(BaseModel):

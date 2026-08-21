@@ -2,24 +2,36 @@
 Composição do "look do dia" — 100% determinística, sem LLM nem API paga.
 
 A geração combina três etapas, todas baseadas nos atributos já salvos em
-`clothing_items` e no clima informado no formulário:
+`clothing_items`, no clima informado e na ocasião escolhida no formulário:
 
-  1. Pré-filtro térmico/chuva: mapeia a temperatura de referência do dia para os
-     pesos térmicos aceitáveis e prioriza peças à prova de chuva nas posições
-     mais expostas.
-  2. Composição: monta de 2 a 3 looks completos e coerentes (formalidade e cor),
-     variando as peças principais entre os looks quando o guarda-roupa permite.
+  1. Pré-filtros: descarta o que a OCASIÃO não admite (inviolável), mapeia a
+     temperatura de referência do dia para os pesos térmicos aceitáveis, mantém
+     o que está no REGISTRO da ocasião e prioriza peças à prova de chuva nas
+     posições mais expostas.
+  2. Composição: monta de 2 a 3 looks completos e coerentes (formalidade, cor e
+     ocasião), variando as peças principais entre os looks quando o
+     guarda-roupa permite.
   3. Justificativa: gera uma frase editorial curta por look, a partir de
-     templates preenchidos com os atributos reais das peças e do clima.
+     templates preenchidos com os atributos reais das peças, do clima e da
+     ocasião.
+
+── Entradas do usuário ──────────────────────────────────────────────────────
+· CONDIÇÕES CLIMÁTICAS são MÚLTIPLAS (`weather["condicoes"]` é uma lista): sol
+  com vento, chuva com frio, etc. As flags derivadas são independentes entre si
+  e se acumulam — chuva+vento pede sobreposição pelos dois motivos.
+· OCASIÃO é ÚNICA e vira um `OccasionProfile` (ver `occasions.py`), que informa
+  alvo de formalidade, viés de conforto, viés de sobreposição, disciplina de cor
+  e categorias favorecidas/proibidas.
 
 Filosofia (igual à da análise de peça): degradar graciosamente. Nunca lança
 erro por falta de peças — devolve o que for possível, com uma nota quando o
-guarda-roupa está limitado para o clima.
+guarda-roupa está limitado para o clima ou para a ocasião.
 
 Determinismo com variedade: as escolhas pseudo-aleatórias (desempate de peças e
-seleção de templates) usam uma semente derivada do clima + do conjunto de peças.
-Assim a mesma requisição sempre produz o mesmo resultado (testável), mas dias/
-guarda-roupas diferentes produzem looks e frases diferentes.
+seleção de templates) usam uma semente derivada do clima + da ocasião + do
+conjunto de peças. Assim a mesma requisição sempre produz o mesmo resultado
+(testável), mas dias/ocasiões/guarda-roupas diferentes produzem looks e frases
+diferentes.
 
 ⚠️ LIMITAÇÃO CONHECIDA — a composição CONFIA NA CATEGORIA armazenada em cada peça
 (`category`), que vem da análise de imagem (FashionCLIP) ou do preenchimento
@@ -44,6 +56,14 @@ import random
 from collections import Counter
 from typing import Any, Optional, TypedDict
 
+from app.services.ai.occasions import (
+    COLOR_NEUTRAL,
+    COLOR_STATEMENT,
+    FORMALITY_SCALE_SPAN,
+    OccasionProfile,
+    get_profile,
+)
+
 logger = logging.getLogger("miranda.ai.look_generation")
 
 
@@ -53,7 +73,9 @@ logger = logging.getLogger("miranda.ai.look_generation")
 class WeatherInfo(TypedDict):
     temperatura_min: float
     temperatura_max: float
-    condicao_climatica: str
+    # Condições combináveis do dia (ex.: ["sol", "vento"]). Lista vazia é
+    # tolerada e equivale a "dia sem particularidade".
+    condicoes: list[str]
 
 
 class SuggestedLookItem(TypedDict):
@@ -69,8 +91,9 @@ class SuggestedLook(TypedDict):
 
 class DailyLookResult(TypedDict):
     looks: list[SuggestedLook]
-    # Nota opcional exibida quando o guarda-roupa está limitado para o clima
-    # (poucas peças, filtro relaxado, etc.). None quando a composição foi plena.
+    # Nota opcional exibida quando o guarda-roupa está limitado para o clima ou
+    # para a ocasião (poucas peças, filtro relaxado, etc.). None quando a
+    # composição foi plena.
     note: Optional[str]
 
 
@@ -122,7 +145,8 @@ ACCEPTABLE_PESO: dict[str, set[str]] = {
 # ── Escala de formalidade ────────────────────────────────────────────────────
 # Ordinal onde a distância <= 1 = "adjacente" (combinável). "esporte" fica ao
 # lado de "casual" e longe de "social" — é o que evita o par esporte×social,
-# citado no spec como incoerente.
+# citado no spec como incoerente. É também a escala em que a ocasião posiciona
+# seu alvo (ver `occasions.py`).
 FORMALITY_RANK: dict[str, int] = {
     "esporte": 0,
     "casual": 1,
@@ -153,6 +177,22 @@ STRONG_COLOR_FAMILIES: dict[str, str] = {
     "roxo": "roxo", "lilás": "roxo", "lilas": "roxo",
 }
 
+# ── Pesos da ocasião na prioridade das peças ─────────────────────────────────
+# Calibração: o encaixe de formalidade (até +1.2) tem peso comparável ao do peso
+# térmico compatível (+1.5), de modo que a ocasião influencia de verdade sem
+# atropelar o conforto térmico. A penalidade por estar fora do registro (−1.0)
+# existe para o caso da relaxação, quando peças fora de registro voltam a
+# concorrer: elas entram, mas por último.
+OCCASION_FIT_WEIGHT = 1.2
+OCCASION_OFF_REGISTER_PENALTY = 1.0
+OCCASION_NULL_FORMALITY_PENALTY = 0.3
+# Peça pesada incomoda quando a ocasião envolve andar E o clima não exige.
+COMFORT_HEAVY_PENALTY = 0.6
+# Prêmio por ponto de cor nas ocasiões de "destaque".
+STATEMENT_COLOR_BONUS = 0.4
+# A partir deste viés, a ocasião pede sobreposição mesmo com clima ameno.
+LAYERING_THRESHOLD = 0.6
+
 MAX_LOOKS = 3
 MIN_DESIRED_LOOKS = 2
 
@@ -175,13 +215,22 @@ def _band_for(temp_ref: float) -> str:
     return BAND_HOT
 
 
-def _normalize_condition(condicao: str) -> dict[str, bool]:
-    """Deriva flags do clima a partir da condição livre informada."""
-    c = (condicao or "").strip().lower()
-    rainy = "chuva" in c
-    windy = "vento" in c
-    cold_signal = "frio" in c
-    return {"rainy": rainy, "windy": windy, "cold_signal": cold_signal}
+def _condition_flags(condicoes: list[str]) -> dict[str, bool]:
+    """
+    Deriva flags independentes a partir das condições marcadas.
+
+    As condições são combináveis, então as flags se ACUMULAM: ["chuva", "vento"]
+    liga `rainy` e `windy` ao mesmo tempo, e cada uma pesa por si na composição
+    (chuva prioriza peça impermeável; vento pede sobreposição).
+    """
+    joined = " ".join((c or "").strip().lower() for c in condicoes)
+    return {
+        "rainy": "chuva" in joined,
+        "windy": "vento" in joined,
+        "cold_signal": "frio" in joined,
+        "sunny": "sol" in joined,
+        "cloudy": "nublado" in joined,
+    }
 
 
 def _color_family(cor: Optional[str]) -> str:
@@ -205,14 +254,25 @@ def _color_family(cor: Optional[str]) -> str:
     return "neutro"
 
 
-def _colors_ok(pieces: list[dict[str, Any]]) -> bool:
-    """Coerente se houver no máximo UMA família de cor forte distinta."""
+def _max_strong_families(profile: OccasionProfile) -> int:
+    """
+    Quantas famílias de cor forte a ocasião tolera num mesmo look.
+
+    Ocasiões de disciplina "neutro" (reunião, entrevista, viagem) não admitem
+    nenhuma: o look não deve competir com quem o veste, nem exigir combinação
+    fina numa mala. As demais mantêm o teto histórico de uma.
+    """
+    return 0 if profile.color_discipline == COLOR_NEUTRAL else 1
+
+
+def _colors_ok(pieces: list[dict[str, Any]], profile: OccasionProfile) -> bool:
+    """Coerente se as famílias de cor forte couberem no teto da ocasião."""
     strong = {
         fam
         for p in pieces
         if (fam := _color_family(p.get("cor_primaria"))) != "neutro"
     }
-    return len(strong) <= 1
+    return len(strong) <= _max_strong_families(profile)
 
 
 def _formality_ok(a: Optional[str], b: Optional[str]) -> bool:
@@ -237,15 +297,75 @@ def _look_formality_ok(pieces: list[dict[str, Any]]) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Encaixe na ocasião
+# ─────────────────────────────────────────────────────────────────────────────
+def _formality_distance(
+    piece: dict[str, Any], profile: OccasionProfile
+) -> Optional[float]:
+    """Distância da peça ao alvo da ocasião. None quando a peça não tem registro."""
+    rank = FORMALITY_RANK.get(piece.get("formalidade"))
+    if rank is None:
+        return None
+    return abs(rank - profile.formality_target)
+
+
+def _in_register(piece: dict[str, Any], profile: OccasionProfile) -> bool:
+    """
+    Peça dentro do registro da ocasião.
+
+    Formalidade nula é CURINGA e entra (mesma política permissiva do peso
+    térmico): a IA de análise deixa esse campo nulo com frequência, e excluir
+    essas peças esvaziaria o guarda-roupa de quem não preencheu tudo à mão.
+    """
+    dist = _formality_distance(piece, profile)
+    return dist is None or dist <= profile.formality_tolerance
+
+
+def _occasion_score(
+    piece: dict[str, Any], profile: OccasionProfile, band: str
+) -> float:
+    """Contribuição da ocasião para a prioridade de uma peça."""
+    score = 0.0
+
+    dist = _formality_distance(piece, profile)
+    if dist is None:
+        # Curinga: entra, mas é uma aposta cega — vale menos que uma peça que
+        # comprovadamente pertence ao registro.
+        score -= OCCASION_NULL_FORMALITY_PENALTY
+    else:
+        score += OCCASION_FIT_WEIGHT * (1.0 - dist / FORMALITY_SCALE_SPAN)
+        if dist > profile.formality_tolerance:
+            score -= OCCASION_OFF_REGISTER_PENALTY
+
+    score += profile.category_bonus.get(piece.get("category"), 0.0)
+
+    # Conforto: só penaliza peça pesada quando o frio NÃO a justifica.
+    if band != BAND_COLD and piece.get("peso_termico") == "pesado":
+        score -= COMFORT_HEAVY_PENALTY * profile.comfort_bias
+
+    # Nas ocasiões de destaque, um ponto de cor é ativo — não só tolerado.
+    if profile.color_discipline == COLOR_STATEMENT:
+        if _color_family(piece.get("cor_primaria")) != "neutro":
+            score += STATEMENT_COLOR_BONUS
+
+    return score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Prioridade das peças (quanto maior, melhor)
 # ─────────────────────────────────────────────────────────────────────────────
 def _piece_priority(
-    piece: dict[str, Any], band: str, flags: dict[str, bool], exposed: bool
+    piece: dict[str, Any],
+    band: str,
+    flags: dict[str, bool],
+    exposed: bool,
+    profile: OccasionProfile,
 ) -> float:
     """
-    Pontua uma peça para o dia. Peças com peso térmico definido e compatível são
-    preferidas; peças com atributos nulos entram (permissivo) mas com leve
-    penalização. Em dia de chuva, peças expostas à prova de chuva ganham pontos.
+    Pontua uma peça para o dia e para a ocasião. Peças com peso térmico definido
+    e compatível são preferidas; peças com atributos nulos entram (permissivo)
+    mas com leve penalização. Em dia de chuva, peças expostas à prova de chuva
+    ganham pontos. A ocasião entra por `_occasion_score`.
     """
     score = 0.0
     peso = piece.get("peso_termico")
@@ -256,21 +376,33 @@ def _piece_priority(
         if peso in ACCEPTABLE_PESO[band]:
             score += 0.5
 
-    if piece.get("formalidade") is not None:
-        score += 0.5  # peça com etiqueta clara é mais fácil de coordenar
-
     if flags["rainy"] and exposed:
         if piece.get("serve_chuva") is True:
             score += 1.0
         elif piece.get("serve_chuva") is False:
             score -= 0.5
 
+    score += _occasion_score(piece, profile, band)
     return score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pré-filtro térmico
+# Pré-filtros
 # ─────────────────────────────────────────────────────────────────────────────
+def _drop_forbidden(
+    items: list[dict[str, Any]], profile: OccasionProfile
+) -> list[dict[str, Any]]:
+    """
+    Remove as categorias que a ocasião NÃO ADMITE.
+
+    Este filtro é inviolável: nunca participa da cascata de relaxação. É
+    preferível não montar um look de academia a sugerir um blazer para ela.
+    """
+    if not profile.forbidden_categories:
+        return list(items)
+    return [i for i in items if i.get("category") not in profile.forbidden_categories]
+
+
 def _thermal_prefilter(items: list[dict[str, Any]], band: str) -> list[dict[str, Any]]:
     """
     Mantém peças cujo peso térmico é compatível com a faixa OU nulo (permissivo).
@@ -283,6 +415,13 @@ def _thermal_prefilter(items: list[dict[str, Any]], band: str) -> list[dict[str,
         if peso is None or peso in acceptable:
             kept.append(it)
     return kept
+
+
+def _register_filter(
+    items: list[dict[str, Any]], profile: OccasionProfile
+) -> list[dict[str, Any]]:
+    """Mantém apenas peças no registro da ocasião (formalidade nula é curinga)."""
+    return [i for i in items if _in_register(i, profile)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,22 +451,43 @@ def _partition(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return slots
 
 
+def _have_core(slots: dict[str, list[dict[str, Any]]]) -> bool:
+    """Há núcleo possível: um vestido, ou um par baixo+cima."""
+    return bool(slots["dresses"]) or (bool(slots["bottoms"]) and bool(slots["tops"]))
+
+
 class _Base:
     """Núcleo de um look (peça única, ou baixo+cima), antes de complementos."""
 
     def __init__(self, mains: list[tuple[dict[str, Any], str]], score: float) -> None:
         self.mains = mains  # lista de (peça, papel)
-        self.score = score
+        self.score = score  # soma bruta das prioridades das peças principais
 
     @property
     def main_ids(self) -> set[str]:
         return {p["id"] for p, _ in self.mains}
+
+    @property
+    def quality(self) -> float:
+        """
+        Prioridade MÉDIA por peça principal — a métrica com que núcleos de
+        formatos diferentes se comparam.
+
+        A soma bruta não serve para isso: um par baixo+cima soma duas
+        prioridades e um vestido só uma, então o par vencia por ser composto de
+        duas peças, não por ser a melhor escolha. Na média, um vestido excelente
+        supera um par medíocre, que é o comportamento esperado — e é o que
+        permite às ocasiões que favorecem vestido (jantar romântico, evento
+        formal) efetivamente propô-lo.
+        """
+        return self.score / len(self.mains)
 
 
 def _build_bases(
     slots: dict[str, list[dict[str, Any]]],
     band: str,
     flags: dict[str, bool],
+    profile: OccasionProfile,
     rng: random.Random,
 ) -> tuple[list[_Base], bool]:
     """
@@ -340,7 +500,7 @@ def _build_bases(
 
     # Vestidos: cada um é um núcleo por si só.
     for dress in slots["dresses"]:
-        pr = _piece_priority(dress, band, flags, exposed=False)
+        pr = _piece_priority(dress, band, flags, False, profile)
         bases.append(_Base([(dress, ROLE_DRESS)], pr))
 
     # Pares baixo+cima coerentes (formalidade adjacente + cor coordenada).
@@ -349,11 +509,11 @@ def _build_bases(
         for top in slots["tops"]:
             if not _formality_ok(bottom.get("formalidade"), top.get("formalidade")):
                 continue
-            if not _colors_ok([bottom, top]):
+            if not _colors_ok([bottom, top], profile):
                 continue
             score = (
-                _piece_priority(bottom, band, flags, exposed=False)
-                + _piece_priority(top, band, flags, exposed=False)
+                _piece_priority(bottom, band, flags, False, profile)
+                + _piece_priority(top, band, flags, False, profile)
             )
             coherent_pairs.append(_Base([(bottom, ROLE_BOTTOM), (top, ROLE_TOP)], score))
 
@@ -366,22 +526,31 @@ def _build_bases(
         for bottom in slots["bottoms"]:
             for top in slots["tops"]:
                 score = (
-                    _piece_priority(bottom, band, flags, exposed=False)
-                    + _piece_priority(top, band, flags, exposed=False)
+                    _piece_priority(bottom, band, flags, False, profile)
+                    + _piece_priority(top, band, flags, False, profile)
                 )
                 bases.append(_Base([(bottom, ROLE_BOTTOM), (top, ROLE_TOP)], score))
 
-    # Ordena por score (desc) com desempate pseudo-aleatório estável.
+    # Ordena por qualidade média (desc) com desempate pseudo-aleatório estável.
+    # Média, e não soma, para que vestido e par disputem em pé de igualdade.
     rng.shuffle(bases)
-    bases.sort(key=lambda b: b.score, reverse=True)
+    bases.sort(key=lambda b: b.quality, reverse=True)
     return bases, relaxed
 
 
 def _select_varied(bases: list[_Base]) -> list[_Base]:
     """
     Seleciona até MAX_LOOKS núcleos priorizando VARIEDADE das peças principais:
-    a cada passo escolhe o núcleo de maior (novidade, score), onde novidade é o
-    número de peças principais ainda não usadas. Evita duplicatas exatas.
+    a cada passo escolhe o núcleo de maior (novidade, score). Evita duplicatas.
+
+    A novidade é uma FRAÇÃO (peças inéditas ÷ peças do núcleo), não uma contagem
+    absoluta. A diferença importa: um vestido é um núcleo de uma peça e um par
+    baixo+cima é de duas, então na contagem absoluta o par vencia sempre por
+    2 > 1 — antes mesmo de o score ser consultado. Nenhum vestido chegava a ser
+    o primeiro look enquanto existisse um par qualquer, e as preferências de
+    ocasião por vestido (jantar romântico, evento formal) não tinham como se
+    manifestar. Normalizada, "totalmente novo" vale 1.0 nos dois formatos e o
+    desempate volta a ser o mérito da peça.
     """
     selected: list[_Base] = []
     used_ids: set[str] = set()
@@ -389,9 +558,9 @@ def _select_varied(bases: list[_Base]) -> list[_Base]:
 
     remaining = list(bases)
     while remaining and len(selected) < MAX_LOOKS:
-        def key(b: _Base) -> tuple[int, float]:
-            novelty = len(b.main_ids - used_ids)
-            return (novelty, b.score)
+        def key(b: _Base) -> tuple[float, float]:
+            novelty = len(b.main_ids - used_ids) / len(b.main_ids)
+            return (novelty, b.quality)
 
         best = max(remaining, key=key)
         remaining.remove(best)
@@ -419,6 +588,7 @@ def _pick_complement(
     band: str,
     flags: dict[str, bool],
     exposed: bool,
+    profile: OccasionProfile,
     rng: random.Random,
 ) -> Optional[dict[str, Any]]:
     """
@@ -431,7 +601,7 @@ def _pick_complement(
         pieces = base_pieces + [c]
         if not _look_formality_ok(pieces):
             continue
-        if not _colors_ok(pieces):
+        if not _colors_ok(pieces, profile):
             continue
         viable.append(c)
     if not viable:
@@ -439,7 +609,7 @@ def _pick_complement(
 
     def key(c: dict[str, Any]) -> tuple[int, float]:
         novel = 0 if c["id"] in used_ids else 1
-        pr = _piece_priority(c, band, flags, exposed)
+        pr = _piece_priority(c, band, flags, exposed, profile)
         return (novel, pr)
 
     rng.shuffle(viable)
@@ -450,13 +620,31 @@ def _pick_complement(
 # ─────────────────────────────────────────────────────────────────────────────
 # Justificativa editorial (templates)
 # ─────────────────────────────────────────────────────────────────────────────
-_CONDITION_PHRASE: dict[str, str] = {
-    "sol": "o sol",
-    "nublado": "o céu fechado",
+# Duas formas de cada condição: uma com artigo (abre a frase) e uma nua (encadeia
+# depois de "com"). Assim ["sol", "vento"] vira "o sol com vento", e não o
+# canhestro "o sol com o vento".
+_CONDITION_MAIN: dict[str, str] = {
     "chuva": "a chuva",
-    "vento": "o vento",
     "frio": "o frio",
+    "vento": "o vento",
+    "nublado": "o céu fechado",
+    "sol": "o sol",
 }
+_CONDITION_BARE: dict[str, str] = {
+    "chuva": "chuva",
+    "frio": "frio",
+    "vento": "vento",
+    "nublado": "céu fechado",
+    "sol": "sol",
+}
+# Como as condições se encadeiam na frase. O ESTADO DO CÉU abre ("o sol com
+# vento", "o céu fechado com frio"), que é como se fala; os MODIFICADORES vêm
+# depois, do mais determinante para o menos. Sem céu marcado, o modificador mais
+# determinante assume a cabeça ("a chuva com vento").
+_SKY_CONDITIONS = ("sol", "nublado")
+_MODIFIER_PRIORITY = ("chuva", "frio", "vento")
+_CONDITION_PRIORITY = _SKY_CONDITIONS + _MODIFIER_PRIORITY
+
 _FORMALITY_WORD: dict[str, str] = {
     "esporte": "esportivo",
     "casual": "casual",
@@ -465,12 +653,28 @@ _FORMALITY_WORD: dict[str, str] = {
 }
 
 
-def _condition_phrase(condicao: str) -> str:
-    c = (condicao or "").strip().lower()
-    for key, phrase in _CONDITION_PHRASE.items():
-        if key in c:
-            return phrase
-    return "o dia"
+def _condition_phrase(condicoes: list[str]) -> str:
+    """Monta a expressão do clima combinando todas as condições marcadas."""
+    joined = " ".join((c or "").strip().lower() for c in condicoes)
+    present = [c for c in _CONDITION_PRIORITY if c in joined]
+    if not present:
+        return "o dia"
+
+    head_key = next((c for c in _SKY_CONDITIONS if c in present), None)
+    if head_key is None:
+        head_key = next(c for c in _MODIFIER_PRIORITY if c in present)
+
+    # Modificadores primeiro; um segundo estado de céu (caso raro de marcar sol
+    # e nublado juntos) fecha a frase.
+    tail = [c for c in _MODIFIER_PRIORITY + _SKY_CONDITIONS if c in present and c != head_key]
+
+    head = _CONDITION_MAIN[head_key]
+    rest = [_CONDITION_BARE[c] for c in tail]
+    if not rest:
+        return head
+    if len(rest) == 1:
+        return f"{head} com {rest[0]}"
+    return f"{head} com {', '.join(rest[:-1])} e {rest[-1]}"
 
 
 def _predominant_formality(pieces: list[dict[str, Any]]) -> Optional[str]:
@@ -498,13 +702,14 @@ def _compose_commentary(
     weather: WeatherInfo,
     band: str,
     flags: dict[str, bool],
+    profile: OccasionProfile,
     rng: random.Random,
 ) -> str:
     """
     Monta uma frase curta e editorial escolhendo, entre templates elegíveis, um
     template cujas variáveis correspondem ao que o look realmente tem.
     """
-    clima = _condition_phrase(weather["condicao_climatica"])
+    clima = _condition_phrase(weather["condicoes"])
     formal = _predominant_formality(pieces)
     formal_word = _FORMALITY_WORD.get(formal or "", "")
     anchor = _anchor_piece(pieces)
@@ -513,6 +718,7 @@ def _compose_commentary(
     rain_piece = next(
         (p for p in pieces if p.get("serve_chuva") is True), None
     )
+    has_outer = any(p.get("_role") == ROLE_OUTER for p in pieces)
     faixa = f"{int(round(weather['temperatura_min']))}°–{int(round(weather['temperatura_max']))}°"
 
     templates: list[str] = []
@@ -521,6 +727,10 @@ def _compose_commentary(
     templates.append(f"Para {clima}, {anchor_name.lower()} conduz. O resto obedece.")
     templates.append(f"{faixa}. A escolha é {anchor_name.lower()} — e nada que a contrarie.")
     templates.append(f"{clima.capitalize()} pede clareza. Este conjunto não hesita.")
+
+    # ── Ocasião: sempre elegíveis, é a informação mais específica que temos ──
+    templates.append(f"Para {profile.phrase}, {anchor_name.lower()} resolve sem alarde.")
+    templates.append(f"{profile.label} sob {clima}: o registro não se negocia.")
 
     if band == BAND_COLD:
         templates.append("Frio se enfrenta em camadas, não em excesso. Aqui, cada peça tem função.")
@@ -538,13 +748,26 @@ def _compose_commentary(
     if strong is not None:
         cor = (strong.get("cor_primaria") or "").strip()
         if cor:
+            if profile.color_discipline == COLOR_STATEMENT:
+                templates.append(f"O {cor} é o convidado de honra. O resto sustenta.")
             templates.append(f"O {cor} é o único ponto de cor permitido — e é o suficiente.")
             templates.append(f"Neutros ancoram, o {cor} decide. Contraste sob controle.")
+    elif profile.color_discipline == COLOR_NEUTRAL:
+        templates.append("Neutros do começo ao fim — nada aqui disputa atenção com você.")
+
+    if profile.comfort_bias >= 0.7:
+        templates.append("Horas de pé pedem leveza. Este conjunto não cobra pedágio.")
+
+    if has_outer and profile.layering_bias >= LAYERING_THRESHOLD:
+        templates.append("A camada extra não é enfeite: é o que salva a mudança de ambiente.")
 
     if flags["rainy"] and rain_piece is not None:
         nome = (rain_piece.get("name") or rain_piece.get("category") or "a peça").strip()
         templates.append(f"A chuva não intimida: {nome.lower()} responde por ela.")
         templates.append("Chuva prevista, elegância mantida — a proteção está onde importa.")
+
+    if flags["windy"] and has_outer:
+        templates.append("Vento é detalhe quando a sobreposição está resolvida.")
 
     return rng.choice(templates)
 
@@ -557,11 +780,16 @@ def _roman(n: int) -> str:
     return numerals[n] if 0 <= n < len(numerals) else str(n + 1)
 
 
-def _seed_from(items: list[dict[str, Any]], weather: WeatherInfo) -> int:
+def _seed_from(
+    items: list[dict[str, Any]], weather: WeatherInfo, profile: OccasionProfile
+) -> int:
     ids = ",".join(sorted(str(i.get("id")) for i in items))
+    # As condições entram ORDENADAS: marcar "sol, vento" ou "vento, sol" é a
+    # mesma informação e deve produzir exatamente o mesmo look.
+    condicoes = ",".join(sorted((c or "").strip().lower() for c in weather["condicoes"]))
     key = (
         f"{ids}|{weather['temperatura_min']}|{weather['temperatura_max']}"
-        f"|{weather['condicao_climatica']}"
+        f"|{condicoes}|{profile.key}"
     )
     digest = hashlib.md5(key.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
@@ -573,6 +801,7 @@ def _assemble_look(
     used_complement_ids: set[str],
     band: str,
     flags: dict[str, bool],
+    profile: OccasionProfile,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
     """Expande um núcleo com sobreposição/calçado/acessório compatíveis."""
@@ -583,15 +812,23 @@ def _assemble_look(
         pc["_role"] = role
         pieces.append(pc)
 
-    wants_outer = band == BAND_COLD or flags["cold_signal"] or flags["rainy"] or flags["windy"]
+    # A sobreposição pode ser pedida pelo CLIMA (frio/chuva/vento) ou pela
+    # OCASIÃO (blazer de reunião, casaco de avião, camada de sala com ar), de
+    # forma independente — daí o `or` com o viés de camada.
+    wants_outer = (
+        band == BAND_COLD
+        or flags["cold_signal"]
+        or flags["rainy"]
+        or flags["windy"]
+        or profile.layering_bias >= LAYERING_THRESHOLD
+    )
     wants_scarf = band == BAND_COLD or flags["cold_signal"]
-    is_dress = any(r == ROLE_DRESS for _, r in base.mains)
 
-    # Sobreposição (quando o clima pede e há peça compatível).
+    # Sobreposição (quando o clima ou a ocasião pede e há peça compatível).
     if wants_outer and slots["outers"]:
         outer = _pick_complement(
             slots["outers"], used_complement_ids, pieces, band, flags,
-            exposed=True, rng=rng,
+            True, profile, rng,
         )
         if outer is not None:
             oc = dict(outer)
@@ -602,7 +839,7 @@ def _assemble_look(
     if slots["footwear"]:
         shoe = _pick_complement(
             slots["footwear"], used_complement_ids, pieces, band, flags,
-            exposed=True, rng=rng,
+            True, profile, rng,
         )
         if shoe is not None:
             sc = dict(shoe)
@@ -613,28 +850,31 @@ def _assemble_look(
     if wants_scarf and slots["scarves"]:
         scarf = _pick_complement(
             slots["scarves"], used_complement_ids, pieces, band, flags,
-            exposed=False, rng=rng,
+            False, profile, rng,
         )
         if scarf is not None:
             fc = dict(scarf)
             fc["_role"] = ROLE_SCARF
             pieces.append(fc)
 
-    if slots["accessories"]:
+    # Acessório extra: algumas ocasiões dispensam (mãos ocupadas no shopping,
+    # ruído visual na entrevista, bagagem na viagem).
+    if profile.wants_accessory and slots["accessories"]:
         acc = _pick_complement(
             slots["accessories"], used_complement_ids, pieces, band, flags,
-            exposed=False, rng=rng,
+            False, profile, rng,
         )
         if acc is not None:
             ac = dict(acc)
             ac["_role"] = ROLE_ACCESSORY
             pieces.append(ac)
 
-    _ = is_dress  # (explicitação: vestido nunca ganha peça de baixo/cima)
     return pieces
 
 
-def _look_structure_is_valid(pieces: list[dict[str, Any]]) -> bool:
+def _look_structure_is_valid(
+    pieces: list[dict[str, Any]], profile: Optional[OccasionProfile] = None
+) -> bool:
     """
     Rede de segurança estrutural (defesa em profundidade): valida um look montado
     contra as regras invioláveis, olhando SOMENTE a `category` de cada peça.
@@ -644,6 +884,8 @@ def _look_structure_is_valid(pieces: list[dict[str, Any]]) -> bool:
         nem com peça de cima (camisa/malha), e nunca há dois vestidos.
       - Sem vestido, há no máximo UMA peça de baixo (calça e saia são ambas peça
         de baixo — nunca duas no mesmo look).
+      - Quando há ocasião, nenhuma peça pode ser de categoria proibida por ela
+        (nenhum blazer na academia) — a proibição é inviolável e não relaxa.
 
     Não reclassifica imagem nem conserta categoria errada: apenas garante que,
     dadas as categorias, a composição jamais viole a estrutura. Por construção os
@@ -651,6 +893,11 @@ def _look_structure_is_valid(pieces: list[dict[str, Any]]) -> bool:
     torna a invariante testável de forma automatizada.
     """
     cats = [p.get("category") for p in pieces]
+
+    if profile is not None and profile.forbidden_categories:
+        if any(c in profile.forbidden_categories for c in cats):
+            return False
+
     n_bottom = sum(1 for c in cats if c in BOTTOMS)
     n_top = sum(1 for c in cats if c in TOPS)
     n_dress = sum(1 for c in cats if c in DRESSES)
@@ -663,57 +910,89 @@ def _look_structure_is_valid(pieces: list[dict[str, Any]]) -> bool:
 def generate_daily_look(
     items: list[dict[str, Any]],
     weather: WeatherInfo,
+    ocasiao: Optional[str] = None,
 ) -> DailyLookResult:
     """
     Gera de 2 a 3 sugestões de look para o dia, de forma determinística.
 
     Args:
         items: peças do usuário (cada uma como dict com id e atributos de moda).
-        weather: mínima, máxima e condição climática do dia.
+        weather: mínima, máxima e a LISTA de condições climáticas do dia.
+        ocasiao: para o que a pessoa precisa do look (chave de `Ocasiao`).
+            Ausente ou desconhecida cai em `dia_a_dia`, o registro mais elástico.
 
     Returns:
         DailyLookResult com a lista de looks (cada um com peças+papéis e uma
         justificativa) e uma nota opcional quando o guarda-roupa está limitado.
         Nunca lança por falta de peças — degrada graciosamente.
     """
-    rng = random.Random(_seed_from(items, weather))
+    profile = get_profile(ocasiao)
+    rng = random.Random(_seed_from(items, weather, profile))
     temp_ref = _reference_temp(weather)
     band = _band_for(temp_ref)
-    flags = _normalize_condition(weather["condicao_climatica"])
+    flags = _condition_flags(weather["condicoes"])
 
     notes: list[str] = []
 
-    # ── Etapa 1: pré-filtro térmico ─────────────────────────────────────────
-    filtered = _thermal_prefilter(items, band)
-    slots = _partition(filtered)
+    # ── Etapa 1: pré-filtros ────────────────────────────────────────────────
+    # A proibição da ocasião é aplicada primeiro e NUNCA é desfeita.
+    allowed = _drop_forbidden(items, profile)
+    n_forbidden = len(items) - len(allowed)
 
-    have_core = bool(slots["dresses"]) or (bool(slots["bottoms"]) and bool(slots["tops"]))
-    if not have_core:
-        # Filtro térmico deixou o guarda-roupa sem núcleo possível: relaxa para
-        # todas as peças (ignora peso) antes de desistir.
-        slots = _partition(items)
-        have_core = bool(slots["dresses"]) or (
-            bool(slots["bottoms"]) and bool(slots["tops"])
-        )
-        if have_core:
-            notes.append(
-                "Poucas peças combinam com esta temperatura; ampliei a seleção "
-                "para montar algo apresentável."
+    thermal = _thermal_prefilter(allowed, band)
+
+    # Cascata de relaxação, do mais restrito ao mais permissivo. Cada degrau
+    # cede exatamente uma restrição e explica o que cedeu. A ordem — soltar o
+    # REGISTRO antes do CLIMA — é deliberada: estar mal-vestida para a ocasião
+    # é constrangedor, estar mal-vestida para o frio é insalubre.
+    attempts: list[tuple[list[dict[str, Any]], Optional[str]]] = [
+        (_register_filter(thermal, profile), None),
+        (
+            thermal,
+            f"O guarda-roupa não tem peças no registro de {profile.label.lower()}; "
+            "compus com o que havia, respeitando o clima.",
+        ),
+        (
+            _register_filter(allowed, profile),
+            "Poucas peças combinam com esta temperatura; ampliei a seleção para "
+            f"manter o registro de {profile.label.lower()}.",
+        ),
+        (
+            allowed,
+            f"Nem o clima nem o registro de {profile.label.lower()} puderam ser "
+            "plenamente respeitados — esta é a melhor composição possível com o "
+            "guarda-roupa atual.",
+        ),
+    ]
+
+    slots: Optional[dict[str, list[dict[str, Any]]]] = None
+    for candidate, note in attempts:
+        partitioned = _partition(candidate)
+        if _have_core(partitioned):
+            slots = partitioned
+            if note:
+                notes.append(note)
+            break
+
+    if slots is None:
+        # Impossível montar um look completo. Degrada com uma nota clara,
+        # distinguindo "faltam peças" de "a ocasião exclui o que você tem".
+        if n_forbidden:
+            note = (
+                f"Nenhuma peça do guarda-roupa serve para {profile.phrase}: "
+                f"{n_forbidden} peça(s) foram descartadas por não caberem nesta "
+                "ocasião. Cadastre uma parte de baixo e uma de cima adequadas."
             )
-
-    if not have_core:
-        # Impossível montar um look completo. Degrada com uma nota clara.
-        return DailyLookResult(
-            looks=[],
-            note=(
+        else:
+            note = (
                 "Ainda não há peças suficientes para compor um look completo. "
                 "Cadastre ao menos uma parte de baixo e uma de cima — ou um "
                 "vestido — para a Miranda trabalhar."
-            ),
-        )
+            )
+        return DailyLookResult(looks=[], note=note)
 
     # ── Etapa 2: composição ─────────────────────────────────────────────────
-    bases, relaxed = _build_bases(slots, band, flags, rng)
+    bases, relaxed = _build_bases(slots, band, flags, profile, rng)
     if relaxed:
         notes.append(
             "As combinações possíveis misturam registros diferentes; priorizei "
@@ -726,16 +1005,18 @@ def generate_daily_look(
     used_complement_ids: set[str] = set()
     for base in selected:
         pieces = _assemble_look(
-            base, slots, used_complement_ids, band, flags, rng
+            base, slots, used_complement_ids, band, flags, profile, rng
         )
 
-        # Rede de segurança: descarta um look que viole a estrutura (nunca deveria
-        # acontecer por construção — se acontecer, sinaliza bug de montagem).
-        if not _look_structure_is_valid(pieces):
+        # Rede de segurança: descarta um look que viole a estrutura ou a
+        # proibição da ocasião (nunca deveria acontecer por construção — se
+        # acontecer, sinaliza bug de montagem).
+        if not _look_structure_is_valid(pieces, profile):
             logger.warning(
-                "Look estruturalmente inválido descartado (categorias: %s) — "
+                "Look inválido descartado (categorias: %s, ocasião: %s) — "
                 "verifique a lógica de montagem.",
                 [p.get("category") for p in pieces],
+                profile.key,
             )
             continue
 
@@ -744,7 +1025,7 @@ def generate_daily_look(
             if p.get("_role") in (ROLE_OUTER, ROLE_FOOTWEAR, ROLE_SCARF, ROLE_ACCESSORY):
                 used_complement_ids.add(p["id"])
 
-        commentary = _compose_commentary(pieces, weather, band, flags, rng)
+        commentary = _compose_commentary(pieces, weather, band, flags, profile, rng)
         looks.append(
             SuggestedLook(
                 label=_roman(len(looks)),  # numeração romana só dos looks válidos

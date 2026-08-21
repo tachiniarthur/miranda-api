@@ -133,6 +133,10 @@ def _nearest_color_name(rgb: tuple[float, float, float]) -> str:
 def _load_rgba(image: "str | bytes") -> np.ndarray:
     from PIL import Image
 
+    from app.services.image_validation import apply_pillow_limits
+
+    apply_pillow_limits()
+
     if isinstance(image, (bytes, bytearray)):
         pil = Image.open(io.BytesIO(bytes(image)))
     else:
