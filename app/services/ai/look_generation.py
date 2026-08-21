@@ -440,16 +440,20 @@ def generate_daily_look(
         return DailyLookResult(looks=[], note=note, unavailable=False)
 
     # ── Etapa 2: composição (chamada paga) ──────────────────────────────────
-    by_id = {str(p["id"]): p for p in selection}
-    user_message = build_user_message(
-        selection, dict(weather), profile.label, recent_item_ids or []
-    )
-
     max_attempts = max(1, settings.ANTHROPIC_MAX_ATTEMPTS)
     last_error: Optional[Exception] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
+            # `by_id` e `user_message` moram DENTRO do try: `build_user_message`
+            # serializa cada peça em JSON, e uma peça com um valor não
+            # serializável (um `Decimal`, um `datetime`, o que a coluna JSONB de
+            # `estacoes` guardar) não pode escapar como 500 cru — cai na mesma
+            # rede de segurança do resto da etapa 2.
+            by_id = {str(p["id"]): p for p in selection}
+            user_message = build_user_message(
+                selection, dict(weather), profile.label, recent_item_ids or []
+            )
             reply = claude_client.request_composition(
                 MIRANDA_SYSTEM_PROMPT, user_message, LOOK_RESPONSE_SCHEMA
             )

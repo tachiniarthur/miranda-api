@@ -233,13 +233,74 @@ def test_all_looks_invalid_is_a_parse_error():
 
 
 def test_a_forbidden_category_in_the_reply_is_discarded():
-    """Rede de segurança: a proibição da ocasião é reconferida na saída."""
+    """
+    Rede de segurança: a proibição da ocasião é reconferida na saída.
+
+    O look aqui é estruturalmente VÁLIDO (baixo + cima + uma sobreposição) —
+    o blazer proibido tem que ser o único motivo da rejeição. Um look com
+    núcleo incompleto seria descartado por `_structure_is_valid` de qualquer
+    forma, o que deixaria a checagem de `forbidden_categories` sem cobertura.
+    """
     sport = get_profile("esporte")
     with pytest.raises(LookParseError):
         _parse_reply(reply([dict(VALID_LOOK, items=[
             {"item_id": "b1", "role": "peça de baixo"},
+            {"item_id": "t1", "role": "peça de cima"},
             {"item_id": "o1", "role": "sobreposição"},
         ])]), BY_ID, sport)
+
+
+def test_a_dress_declared_as_a_bottom_is_a_parse_error():
+    """
+    O comentário do módulo explica por que o guarda-papel↔categoria existe: o
+    schema só valida que `role` é uma das strings do enum, então um vestido
+    anunciado como "peça de baixo" passaria pelo schema e produziria um look
+    fisicamente errado se nada mais o barrasse.
+    """
+    dress_as_bottom = dict(VALID_LOOK, items=[
+        {"item_id": "d1", "role": "peça de baixo"},
+    ])
+    with pytest.raises(LookParseError):
+        _parse_reply(reply([dress_as_bottom]), BY_ID, PROFILE)
+
+
+def test_blank_commentary_is_a_parse_error():
+    blank = dict(VALID_LOOK, commentary="   ")
+    with pytest.raises(LookParseError):
+        _parse_reply(reply([blank]), BY_ID, PROFILE)
+
+
+def test_two_outer_layers_in_one_look_is_discarded_not_returned():
+    """`o1` é o único blazer do guarda-roupa de teste — repetir o id força a
+    duplicidade a bater primeiro no papel de sobreposição, não no id."""
+    two_outers = dict(VALID_LOOK, items=[
+        {"item_id": "b1", "role": "peça de baixo"},
+        {"item_id": "t1", "role": "peça de cima"},
+        {"item_id": "o1", "role": "sobreposição"},
+        {"item_id": "o2", "role": "sobreposição"},
+    ])
+    by_id = dict(BY_ID, o2=piece("o2", "casaco", peso="pesado"))
+    looks, _ = _parse_reply(reply([two_outers, VALID_LOOK]), by_id, PROFILE)
+    assert len(looks) == 1
+    assert [i["item_id"] for i in looks[0]["items"]] == ["b1", "t1", "f1"]
+
+
+def test_two_dresses_in_one_look_is_discarded_not_returned():
+    by_id = dict(BY_ID, d2=piece("d2", "vestido", cor="azul"))
+    two_dresses = dict(VALID_LOOK, items=[
+        {"item_id": "d1", "role": "peça única"},
+        {"item_id": "d2", "role": "peça única"},
+    ])
+    looks, _ = _parse_reply(reply([two_dresses, VALID_LOOK]), by_id, PROFILE)
+    assert len(looks) == 1
+    assert [i["item_id"] for i in looks[0]["items"]] == ["b1", "t1", "f1"]
+
+
+def test_a_non_string_note_is_coerced_to_none():
+    """`note` fora do tipo esperado é silenciosamente descartada, não propagada."""
+    payload = json.dumps({"looks": [VALID_LOOK], "note": 123}, ensure_ascii=False)
+    _, note = _parse_reply(payload, BY_ID, PROFILE)
+    assert note is None
 
 
 def test_more_than_three_looks_are_truncated():
@@ -373,3 +434,18 @@ def test_recent_looks_reach_the_prompt(monkeypatch):
     generate_daily_look(WARDROBE, MILD_DAY, ocasiao="dia_a_dia",
                         recent_item_ids=[["b1", "t1"]])
     assert "recente" in calls[0]["user_message"].lower()
+
+
+def test_a_non_serializable_piece_degrades_instead_of_raising(monkeypatch):
+    """
+    `by_id`/`build_user_message` moram dentro do try da etapa 2: uma peça com
+    um atributo que `json.dumps` não sabe serializar (aqui, um `set` em vez de
+    string) não pode escapar como 500 cru. O contrato da rota é HTTP 200
+    sempre — mesmo quando o problema está nos DADOS, não na rede ou no modelo.
+    """
+    calls = _stub_api(monkeypatch, [reply([VALID_LOOK])])
+    poisoned = WARDROBE + [piece("bad1", "camisa", cor={"nao", "serializavel"})]
+    result = generate_daily_look(poisoned, MILD_DAY, ocasiao="dia_a_dia")
+    assert calls == []
+    assert result["looks"] == []
+    assert result["unavailable"] is True
