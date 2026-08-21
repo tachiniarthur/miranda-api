@@ -78,6 +78,22 @@ def _api_error(status: int) -> anthropic.APIStatusError:
     return anthropic.APIStatusError("boom", response=response, body=None)
 
 
+def _typed_api_error(cls: type, status: int) -> anthropic.APIStatusError:
+    """
+    Constrói a subclasse TIPADA (`RateLimitError`, `NotFoundError`, ...) que o
+    SDK de verdade levanta quando é ele mesmo quem monta o erro a partir de uma
+    resposta HTTP real (`_make_status_error` promove por status code). Isso é
+    diferente de `_api_error()` acima, que instancia `APIStatusError` genérico
+    à mão — o formato que um erro construído diretamente tem. Os dois cenários
+    existem na suíte de propósito: um prova o caminho de produção (as cláusulas
+    `except` tipadas), o outro prova o fallback genérico. Nenhum dos dois é
+    redundante com o outro.
+    """
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status, request=request, json={"error": {"message": "x"}})
+    return cls("boom", response=response, body=None)
+
+
 # ── Caminho feliz ───────────────────────────────────────────────────────────
 def test_returns_the_text_of_the_first_text_block(monkeypatch):
     _install(monkeypatch, _Response(text='{"looks":[]}'))
@@ -145,6 +161,35 @@ def test_connection_errors_are_transient(monkeypatch):
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
 def test_client_errors_are_fatal(monkeypatch, status):
     _install(monkeypatch, _api_error(status))
+    with pytest.raises(LookApiFatal):
+        request_composition("sys", "user", {"type": "object"})
+
+
+# ── Classificação de erro — subclasses TIPADAS ──────────────────────────────
+# Os testes acima usam `_api_error()`, que constrói um `APIStatusError`
+# genérico à mão — é o formato de um erro montado diretamente, não o que a API
+# de verdade produz. Em produção, o SDK promove por status code e levanta a
+# subclasse TIPADA (`RateLimitError`, `NotFoundError`, ...). Sem testar esse
+# caminho, as cláusulas `except` tipadas em `request_composition` nunca são
+# exercitadas — o requisito de retentar em rate limit ficaria sem prova real.
+# Os dois conjuntos de teste cobrem caminhos diferentes; nenhum é redundante.
+def test_typed_rate_limit_error_is_transient(monkeypatch):
+    _install(monkeypatch, _typed_api_error(anthropic.RateLimitError, 429))
+    with pytest.raises(LookApiTransient):
+        request_composition("sys", "user", {"type": "object"})
+
+
+@pytest.mark.parametrize(
+    "cls,status",
+    [
+        (anthropic.AuthenticationError, 401),
+        (anthropic.PermissionDeniedError, 403),
+        (anthropic.NotFoundError, 404),
+        (anthropic.BadRequestError, 400),
+    ],
+)
+def test_typed_client_errors_are_fatal(monkeypatch, cls, status):
+    _install(monkeypatch, _typed_api_error(cls, status))
     with pytest.raises(LookApiFatal):
         request_composition("sys", "user", {"type": "object"})
 
