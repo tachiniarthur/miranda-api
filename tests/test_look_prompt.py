@@ -40,6 +40,46 @@ def test_system_prompt_asks_for_two_or_three_varied_looks():
     assert "não repita a mesma peça de cima" in MIRANDA_SYSTEM_PROMPT.lower()
 
 
+# ── Concessões: quando a função vence o estilo ──────────────────────────────
+# Estas duas regras nasceram do primeiro teste real contra o guarda-roupa de 21
+# peças. Nos dois casos a ESCOLHA do modelo estava certa e só o TEXTO estava
+# desatento — ele apresentava como harmônica uma combinação que não era. Por
+# isso os testes conferem que o manual cobre as duas concessões e, sobretudo,
+# que ele barra o excesso oposto: ressalva em look que não tem tensão nenhuma.
+def test_system_prompt_asks_to_own_a_colour_concession_forced_by_function():
+    """
+    Caso de origem: bota marrom com calça preta, porque a bota era o único
+    calçado `serve_chuva` do dia. A combinação estava certa — a justificativa
+    é que fingiu não haver tensão.
+    """
+    prompt = MIRANDA_SYSTEM_PROMPT
+    assert "Concessão de COR por função" in prompt
+    assert "serve_chuva" in prompt
+    assert "Nomeie a tensão" in prompt
+
+
+def test_system_prompt_separates_fitting_the_weather_from_fitting_the_occasion():
+    """
+    Caso de origem: parka num dia de trabalho. Cabia no clima e não cabia no
+    registro — e "formalidade" no cadastro só descreve o segundo.
+    """
+    prompt = MIRANDA_SYSTEM_PROMPT
+    assert "Concessão de REGISTRO por clima" in prompt
+    assert "duas" in prompt and "adequações diferentes" in prompt
+    # A ordem importa: primeiro escolher a menos casual, só depois ressalvar.
+    assert "escolha a MENOS casual" in prompt
+    assert "Nunca apresente como" in prompt
+
+
+def test_system_prompt_forbids_inventing_a_concession_where_there_is_none():
+    """
+    A trava do exagero oposto. Sem ela, a regra acima convidaria o modelo a
+    pedir desculpas em todo look — o contrário do tom da casa.
+    """
+    assert "tensão REAL" in MIRANDA_SYSTEM_PROMPT
+    assert "não se desculpa por acertar" in MIRANDA_SYSTEM_PROMPT
+
+
 def test_system_prompt_lists_every_role_the_frontend_renders():
     for role in VALID_ROLES:
         assert role in MIRANDA_SYSTEM_PROMPT, f"papel ausente do manual: {role}"
