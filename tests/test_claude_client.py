@@ -23,9 +23,11 @@ from app.services.ai.claude_client import (
 
 
 class _Usage:
-    def __init__(self, i=100, o=200):
+    def __init__(self, i=100, o=200, cache_write=0, cache_read=0):
         self.input_tokens = i
         self.output_tokens = o
+        self.cache_creation_input_tokens = cache_write
+        self.cache_read_input_tokens = cache_read
 
 
 class _Block:
@@ -122,7 +124,9 @@ def test_sends_effort_and_schema_but_never_temperature(monkeypatch):
     assert sent["output_config"]["effort"] == claude_client.settings.ANTHROPIC_EFFORT
     assert sent["output_config"]["format"]["type"] == "json_schema"
     assert sent["output_config"]["format"]["schema"] is schema
-    assert sent["system"] == "sys"
+    # O system virou lista de blocos quando o cache de prompt foi ativado; o
+    # conteúdo é o mesmo, só o invólucro mudou (ver os testes de cache abaixo).
+    assert sent["system"][0]["text"] == "sys"
     assert sent["messages"] == [{"role": "user", "content": "user"}]
 
 
@@ -243,3 +247,88 @@ def test_cost_of_an_unknown_model_is_zero_not_a_crash():
     """
     usage = ClaudeUsage(input_tokens=1000, output_tokens=1000, model="modelo-inexistente")
     assert usage.estimated_cost_usd == 0.0
+
+
+# ── Cache de prompt ─────────────────────────────────────────────────────────
+# O manual de estilo são ~1,7k tokens fixos reenviados em TODA geração, de
+# todos os usuários. Cacheá-lo corta ~90% do preço desse prefixo na releitura.
+# O que estes testes protegem é a FRONTEIRA: system cacheado, mensagem de
+# usuário não. Marcar a mensagem de usuário seria pior que não cachear nada —
+# ela muda a cada requisição, então pagaria o ágio de escrita (1,25x) sem nunca
+# render uma leitura.
+def test_the_style_manual_is_sent_as_a_cacheable_block(monkeypatch):
+    fake = _install(monkeypatch, _Response())
+    request_composition("O MANUAL", "user", {"type": "object"})
+
+    system = fake.messages.calls[0]["system"]
+    assert isinstance(system, list), "system precisa ser lista de blocos para aceitar cache_control"
+    assert len(system) == 1
+    assert system[0]["type"] == "text"
+    assert system[0]["text"] == "O MANUAL"
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_the_user_message_is_never_cached(monkeypatch):
+    """
+    Guarda-roupa, clima e histórico são de cada pessoa e de cada requisição.
+    Cachear isso só pagaria o ágio de escrita sem nunca render leitura.
+    """
+    fake = _install(monkeypatch, _Response())
+    request_composition("sys", "o guarda-roupa de alguém", {"type": "object"})
+
+    messages = fake.messages.calls[0]["messages"]
+    assert messages == [{"role": "user", "content": "o guarda-roupa de alguém"}]
+    assert "cache_control" not in str(messages)
+
+
+def test_cache_counters_reach_the_usage(monkeypatch):
+    _install(monkeypatch, _Response(usage=_Usage(i=10, o=20, cache_write=1500, cache_read=0)))
+    first = request_composition("sys", "user", {"type": "object"})
+    assert first.usage.cache_creation_input_tokens == 1500
+    assert first.usage.cache_read_input_tokens == 0
+
+    claude_client.reset_client_cache()
+    _install(monkeypatch, _Response(usage=_Usage(i=10, o=20, cache_write=0, cache_read=1500)))
+    second = request_composition("sys", "user", {"type": "object"})
+    assert second.usage.cache_read_input_tokens == 1500
+
+
+def test_cache_write_costs_more_and_cache_read_costs_almost_nothing():
+    """
+    Gravar custa 1,25x o preço de entrada; ler custa 0,10x. É essa assimetria
+    que faz o cache valer a pena só para um prefixo reenviado.
+    """
+    write = ClaudeUsage(input_tokens=0, output_tokens=0, model="claude-opus-5",
+                        cache_creation_input_tokens=1_000_000)
+    read = ClaudeUsage(input_tokens=0, output_tokens=0, model="claude-opus-5",
+                       cache_read_input_tokens=1_000_000)
+    plain = ClaudeUsage(input_tokens=1_000_000, output_tokens=0, model="claude-opus-5")
+
+    assert plain.estimated_cost_usd == pytest.approx(5.00)
+    assert write.estimated_cost_usd == pytest.approx(6.25)   # 5,00 x 1,25
+    assert read.estimated_cost_usd == pytest.approx(0.50)    # 5,00 x 0,10
+
+
+def test_cached_tokens_are_not_billed_twice():
+    """
+    `input_tokens` já EXCLUI o que veio do cache. Somar os três campos como se
+    fossem entrada cheia inflaria o custo registrado.
+    """
+    usage = ClaudeUsage(input_tokens=1000, output_tokens=0, model="claude-opus-5",
+                        cache_read_input_tokens=1_000_000)
+    # 1000 tokens a preço cheio + 1M lidos a 10% = 0,005 + 0,50
+    assert usage.estimated_cost_usd == pytest.approx(0.505)
+
+
+def test_the_log_reports_the_saving_against_an_uncached_call():
+    usage = ClaudeUsage(input_tokens=0, output_tokens=0, model="claude-opus-5",
+                        cache_read_input_tokens=1_000_000)
+    assert usage.cost_without_cache_usd == pytest.approx(5.00)
+    assert usage.cost_without_cache_usd > usage.estimated_cost_usd
+
+
+def test_an_unknown_model_still_reports_zero_for_both_figures():
+    usage = ClaudeUsage(input_tokens=100, output_tokens=100, model="modelo-inexistente",
+                        cache_read_input_tokens=100)
+    assert usage.estimated_cost_usd == 0.0
+    assert usage.cost_without_cache_usd == 0.0
