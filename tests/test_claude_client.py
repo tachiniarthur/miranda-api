@@ -67,6 +67,11 @@ def _clear_cache():
     claude_client.reset_client_cache()
 
 
+def _enable_cache(monkeypatch, enabled: bool = True):
+    """Liga/desliga ENABLE_PROMPT_CACHE para o teste corrente."""
+    monkeypatch.setattr(claude_client.settings, "ENABLE_PROMPT_CACHE", enabled)
+
+
 def _install(monkeypatch, outcome, api_key="sk-ant-test"):
     fake = _FakeClient(outcome)
     monkeypatch.setattr(claude_client.settings, "ANTHROPIC_API_KEY", api_key)
@@ -257,6 +262,7 @@ def test_cost_of_an_unknown_model_is_zero_not_a_crash():
 # ela muda a cada requisição, então pagaria o ágio de escrita (1,25x) sem nunca
 # render uma leitura.
 def test_the_style_manual_is_sent_as_a_cacheable_block(monkeypatch):
+    _enable_cache(monkeypatch)
     fake = _install(monkeypatch, _Response())
     request_composition("O MANUAL", "user", {"type": "object"})
 
@@ -273,6 +279,7 @@ def test_the_user_message_is_never_cached(monkeypatch):
     Guarda-roupa, clima e histórico são de cada pessoa e de cada requisição.
     Cachear isso só pagaria o ágio de escrita sem nunca render leitura.
     """
+    _enable_cache(monkeypatch)
     fake = _install(monkeypatch, _Response())
     request_composition("sys", "o guarda-roupa de alguém", {"type": "object"})
 
@@ -332,3 +339,72 @@ def test_an_unknown_model_still_reports_zero_for_both_figures():
                         cache_read_input_tokens=100)
     assert usage.estimated_cost_usd == 0.0
     assert usage.cost_without_cache_usd == 0.0
+
+
+# ── A chave de liga/desliga do cache ────────────────────────────────────────
+# O cache está implementado e validado contra a API real, mas vem DESLIGADO:
+# com gerações esparsas quase toda chamada seria uma gravação (ágio de 25%) e
+# sairia mais cara que sem cache. Estes testes protegem os dois estados — e o
+# padrão, que é o que roda em produção hoje.
+def test_the_cache_is_off_by_default():
+    """
+    Se este teste falhar porque alguém mudou o default, a mudança precisa ser
+    deliberada: ela altera o custo de toda geração do produto.
+    """
+    from app.core.config import Settings
+
+    fresh = Settings(
+        DATABASE_URL="postgresql+psycopg2://u:p@localhost:5432/db",
+        JWT_SECRET_KEY="x" * 48,
+        _env_file=None,
+    )
+    assert fresh.ENABLE_PROMPT_CACHE is False
+
+
+def test_with_the_cache_off_no_block_carries_cache_control(monkeypatch):
+    """
+    Desligado, a requisição tem de ser indistinguível da que existia antes de o
+    cache ser introduzido — nenhum `cache_control` em lugar nenhum.
+    """
+    _enable_cache(monkeypatch, False)
+    fake = _install(monkeypatch, _Response())
+    request_composition("O MANUAL", "o guarda-roupa", {"type": "object"})
+
+    sent = fake.messages.calls[0]
+    assert sent["system"] == [{"type": "text", "text": "O MANUAL"}]
+    assert "cache_control" not in str(sent), "nenhum bloco pode carregar cache_control"
+
+
+def test_with_the_cache_on_only_the_system_block_carries_cache_control(monkeypatch):
+    """Ligado: marcação no manual, e em nada mais."""
+    _enable_cache(monkeypatch, True)
+    fake = _install(monkeypatch, _Response())
+    request_composition("O MANUAL", "o guarda-roupa", {"type": "object"})
+
+    sent = fake.messages.calls[0]
+    assert sent["system"] == [
+        {"type": "text", "text": "O MANUAL", "cache_control": {"type": "ephemeral"}}
+    ]
+    # Exatamente uma marcação na requisição inteira: a do system.
+    assert str(sent).count("cache_control") == 1
+
+
+def test_toggling_the_flag_changes_nothing_but_the_marking(monkeypatch):
+    """
+    A flag controla o cache e nada além dele. Se ligá-la mexesse no modelo, no
+    effort, no schema ou na mensagem, seria um efeito colateral escondido.
+    """
+    _enable_cache(monkeypatch, False)
+    off = _install(monkeypatch, _Response())
+    request_composition("m", "u", {"type": "object"})
+    sent_off = dict(off.messages.calls[0])
+
+    claude_client.reset_client_cache()
+    _enable_cache(monkeypatch, True)
+    on = _install(monkeypatch, _Response())
+    request_composition("m", "u", {"type": "object"})
+    sent_on = dict(on.messages.calls[0])
+
+    for key in ("model", "max_tokens", "messages", "output_config"):
+        assert sent_off[key] == sent_on[key], f"{key} não devia mudar com a flag"
+    assert sent_off["system"] != sent_on["system"]
