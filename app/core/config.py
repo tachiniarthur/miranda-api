@@ -136,6 +136,20 @@ class Settings(BaseSettings):
     # Timeout por tentativa, em segundos.
     ANTHROPIC_TIMEOUT_SECONDS: float = 60.0
 
+    # Cache de prompt no manual de estilo (o bloco do system).
+    #
+    # DESLIGADO por padrão, e isso é uma decisão de custo medida, não um
+    # esquecimento. Gravar o cache tem ágio de 25% sobre o prefixo; ler dele
+    # custa 10%. Como a janela do `ephemeral` é de 5 minutos, o cache só rende
+    # se as gerações acontecerem a poucos minutos umas das outras. No volume
+    # atual do produto elas são esparsas, então quase toda chamada seria uma
+    # GRAVAÇÃO — e sairia ~9% mais cara do que sem cache nenhum.
+    #
+    # Ligue quando o produto tiver usuários de verdade gerando looks de forma
+    # contínua. O prefixo é o mesmo para todo mundo, então é o volume TOTAL que
+    # conta, não o de cada pessoa. Ver README, seção 12.
+    ENABLE_PROMPT_CACHE: bool = False
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")

@@ -52,6 +52,14 @@ MODEL_PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
 }
 
+# Multiplicadores do cache de prompt sobre o preço de ENTRADA do modelo.
+# Gravar no cache custa mais caro que um token normal; ler dele custa quase
+# nada. É essa assimetria que torna o cache vantajoso só quando o mesmo prefixo
+# é reenviado — que é exatamente o caso do manual de estilo, idêntico em toda
+# geração e para todos os usuários.
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.10
+
 
 @dataclass(frozen=True)
 class ClaudeUsage:
@@ -60,17 +68,49 @@ class ClaudeUsage:
     input_tokens: int
     output_tokens: int
     model: str
+    # Tokens que ENTRARAM no cache nesta chamada (a primeira de uma janela).
+    cache_creation_input_tokens: int = 0
+    # Tokens servidos DE dentro do cache (as chamadas seguintes na janela).
+    cache_read_input_tokens: int = 0
 
     @property
     def estimated_cost_usd(self) -> float:
+        """
+        Custo da chamada, com os três preços de entrada que o cache cria.
+
+        `input_tokens` conta apenas o que NÃO veio do cache — a API já separa os
+        três números, então somá-los aqui seria cobrar duas vezes pelo mesmo
+        token.
+        """
         prices = MODEL_PRICES_USD_PER_MTOK.get(self.model)
         if prices is None:
             return 0.0
         price_in, price_out = prices
         return (
             self.input_tokens / 1_000_000 * price_in
+            + self.cache_creation_input_tokens / 1_000_000 * price_in * CACHE_WRITE_MULTIPLIER
+            + self.cache_read_input_tokens / 1_000_000 * price_in * CACHE_READ_MULTIPLIER
             + self.output_tokens / 1_000_000 * price_out
         )
+
+    @property
+    def cost_without_cache_usd(self) -> float:
+        """
+        O que esta mesma chamada teria custado sem cache nenhum.
+
+        Serve só para o log mostrar a economia real em vez de exigir que alguém
+        faça a conta de cabeça.
+        """
+        prices = MODEL_PRICES_USD_PER_MTOK.get(self.model)
+        if prices is None:
+            return 0.0
+        price_in, price_out = prices
+        full_input = (
+            self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+        return full_input / 1_000_000 * price_in + self.output_tokens / 1_000_000 * price_out
 
 
 @dataclass(frozen=True)
@@ -114,6 +154,38 @@ def reset_client_cache() -> None:
     _client = None
 
 
+def _system_blocks(system: str) -> list[dict[str, Any]]:
+    """
+    Monta o bloco do system, com ou sem marcação de cache.
+
+    ── O que é cacheado, quando o cache está ligado ────────────────────────
+    Só o manual de estilo. Ele é texto fixo: os mesmos ~3,4k tokens de prefixo
+    em toda geração, de todos os usuários — o cache é da conta, não da pessoa.
+
+    A mensagem de usuário NUNCA é marcada, ligado ou desligado. Ela carrega o
+    guarda-roupa filtrado, o clima e o histórico daquela pessoa, muda a cada
+    requisição, e cacheá-la só pagaria o ágio de escrita sem render leitura.
+
+    A ordem de renderização (`tools` → `system` → `messages`) já põe o estável
+    antes do volátil, que é o que o cache de prefixo exige. Editar o manual
+    invalida o cache e a próxima chamada regrava — esperado, não erro.
+
+    ── Por que o padrão é DESLIGADO ────────────────────────────────────────
+    Gravar custa 1,25x o preço de entrada, ler custa 0,10x, e a janela do
+    `ephemeral` é de 5 minutos. Com gerações esparsas quase toda chamada seria
+    uma gravação, saindo ~9% mais cara do que sem cache. Medido contra a API
+    real: gravar US$ 0,0507 contra US$ 0,0464 sem cache; ler US$ 0,0345 contra
+    US$ 0,0499. Ver `settings.ENABLE_PROMPT_CACHE` e o README, seção 12.
+
+    Com a flag desligada o bloco sai idêntico ao que era antes de o cache
+    existir — nenhuma outra parte da requisição muda.
+    """
+    block: dict[str, Any] = {"type": "text", "text": system}
+    if settings.ENABLE_PROMPT_CACHE:
+        block["cache_control"] = {"type": "ephemeral"}
+    return [block]
+
+
 def request_composition(
     system: str, user_message: str, schema: dict[str, Any]
 ) -> ClaudeReply:
@@ -145,7 +217,7 @@ def request_composition(
         response = _get_client().messages.create(
             model=model,
             max_tokens=settings.ANTHROPIC_MAX_OUTPUT_TOKENS,
-            system=system,
+            system=_system_blocks(system),
             messages=[{"role": "user", "content": user_message}],
             # `effort` no lugar de `temperature`: os modelos atuais REJEITAM
             # `temperature` com HTTP 400. `format` faz a própria API garantir
@@ -186,18 +258,32 @@ def request_composition(
         input_tokens=getattr(response.usage, "input_tokens", 0),
         output_tokens=getattr(response.usage, "output_tokens", 0),
         model=model,
+        # `getattr` com default: os dublês de teste não precisam simular o
+        # cache para exercitar o resto do transporte.
+        cache_creation_input_tokens=getattr(
+            response.usage, "cache_creation_input_tokens", 0
+        ) or 0,
+        cache_read_input_tokens=getattr(
+            response.usage, "cache_read_input_tokens", 0
+        ) or 0,
     )
 
     # Log de custo: é o único instrumento de acompanhamento nesta fase — não há
     # controle de quota (isso é uma fase à parte do projeto).
     cost = usage.estimated_cost_usd
+    baseline = usage.cost_without_cache_usd
     logger.info(
         "composição de look — modelo=%s input_tokens=%d output_tokens=%d "
-        "custo_estimado_usd=%.6f",
+        "cache_creation_input_tokens=%d cache_read_input_tokens=%d "
+        "custo_estimado_usd=%.6f custo_sem_cache_usd=%.6f economia_usd=%.6f",
         model,
         usage.input_tokens,
         usage.output_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
         cost,
+        baseline,
+        baseline - cost,
     )
     if cost == 0.0 and model not in MODEL_PRICES_USD_PER_MTOK:
         logger.warning(
