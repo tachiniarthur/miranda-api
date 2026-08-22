@@ -1,9 +1,15 @@
 """
 Camada de IA do Miranda (services/ai).
 
-Toda a camada é 100% self-hosted, sem nenhuma API paga: a análise de peça
-(FashionCLIP + k-means + regras determinísticas) e a composição do look do dia
-(`generate_daily_look`, determinística por regras — sem LLM).
+Duas metades, com custos bem diferentes:
+
+  · ANÁLISE DE PEÇA (`clothing_analysis`, `fashion_clip`, `color_extraction`,
+    `rules`, `labels`) é 100% self-hosted e gratuita: FashionCLIP local +
+    k-means + regras determinísticas, sem chamada de rede paga.
+  · COMPOSIÇÃO DO LOOK (`look_generation`, `look_prompt`, `claude_client`) chama
+    a API do Claude a cada geração — `generate_daily_look` NÃO é mais
+    determinística nem gratuita: cada composição custa dinheiro (ver
+    `claude_client.MODEL_PRICES_USD_PER_MTOK` e o log de custo estimado).
 """
 
 from app.services.ai.clothing_analysis import (

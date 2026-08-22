@@ -36,3 +36,10 @@ transformers>=4.46,<5
 scikit-learn>=1.4
 numpy>=1.26
 Pillow>=10.0
+
+# ── IA paga (composição do look do dia) ──────────────────────────────
+# SDK oficial da Anthropic. A composição do look do dia (POST /api/looks/generate)
+# chama a API do Claude e CUSTA DINHEIRO por geração — ver README, seção 12.
+# Exige ANTHROPIC_API_KEY no .env; sem ela a geração degrada com uma nota e o
+# resto da API continua funcionando.
+anthropic==1.0.0

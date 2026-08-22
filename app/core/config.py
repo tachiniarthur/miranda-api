@@ -99,6 +99,43 @@ class Settings(BaseSettings):
     FASHION_CLIP_THRESHOLD_ESTAMPA: float = 0.85
     FASHION_CLIP_THRESHOLD_FORMALIDADE: float = 0.60
 
+    # ── IA (composição de look, API paga da Anthropic) ────────────────
+    # Diferente da análise de peça — que é self-hosted e gratuita —, a
+    # composição do look do dia chama a API do Claude e CUSTA DINHEIRO por
+    # geração. Ver README, seção 12.
+    #
+    # A chave fica vazia por padrão de propósito: a aplicação DEVE subir sem
+    # ela. Sem chave, a geração de look devolve uma nota explicando que não
+    # foi possível gerar agora — o resto da API (guarda-roupa, autenticação,
+    # análise de peça) continua funcionando normalmente. Derrubar o boot aqui
+    # trocaria uma funcionalidade indisponível por um serviço fora do ar.
+    ANTHROPIC_API_KEY: str = ""
+
+    # Identificador do modelo, isolado numa variável para poder ser trocado
+    # sem tocar em código. Preços (US$ por milhão de tokens) em
+    # `services/ai/claude_client.py`; ao trocar de modelo, atualize-os lá.
+    ANTHROPIC_MODEL: str = "claude-opus-5"
+
+    # Teto de tokens de saída. O JSON de 3 looks fica na casa dos 600 tokens;
+    # 4000 dá folga para o raciocínio adaptativo do modelo sem desperdiçar.
+    ANTHROPIC_MAX_OUTPUT_TOKENS: int = 4000
+
+    # Profundidade de raciocínio: low | medium | high | xhigh | max.
+    #
+    # Ocupa o lugar do antigo `temperature`, que os modelos atuais REJEITAM com
+    # HTTP 400 ("temperature is deprecated for this model"). O objetivo aqui é
+    # consistência e bom senso, não criatividade dispersiva — "medium" entrega
+    # isso sem pagar o preço de "high" numa tarefa de escopo pequeno.
+    ANTHROPIC_EFFORT: str = "medium"
+
+    # Tentativas TOTAIS por geração (não tentativas adicionais). Cobre falha de
+    # rede, rate limit e resposta impossível de interpretar. Poucas de
+    # propósito: o usuário está esperando na tela.
+    ANTHROPIC_MAX_ATTEMPTS: int = 3
+
+    # Timeout por tentativa, em segundos.
+    ANTHROPIC_TIMEOUT_SECONDS: float = 60.0
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")

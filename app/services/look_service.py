@@ -1,18 +1,24 @@
 """
 Lógica de negócio do "look do dia".
 
-Orquestra a composição determinística (services/ai/look_generation), resolve as
-peças sugeridas para os dados que o frontend precisa renderizar, persiste o
-registro em `looks_history` e devolve a resposta pronta.
+Orquestra a composição (services/ai/look_generation — pré-filtro determinístico
+mais uma chamada à API do Claude), resolve as peças sugeridas para os dados que
+o frontend precisa renderizar, persiste o registro em `looks_history` e devolve
+a resposta pronta.
 
-Sem IA paga e sem LLM: a composição é 100% baseada em regras e nos atributos já
-salvos em `clothing_items`.
+O histórico não é só arquivo: os looks recentes voltam como CONTEXTO da próxima
+geração, para a Miranda não repetir na terça a combinação que ditou na segunda.
+
+⚠️ A composição chama uma API PAGA. A análise de peça (services/ai/clothing_analysis)
+continua self-hosted e gratuita — são coisas diferentes. Ver README, seção 12.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.models.clothing_item import ClothingItem
@@ -27,13 +33,7 @@ from app.services.ai.look_generation import generate_daily_look
 from app.services.storage import authenticated_image_url
 from app.services.wardrobe_service import list_items
 
-
-class LookNotAvailableError(Exception):
-    """Erro de negócio (reservado para indisponibilidade genérica da geração)."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
+logger = logging.getLogger("miranda.look_service")
 
 
 def _item_to_payload(item: ClothingItem) -> dict:
@@ -52,6 +52,47 @@ def _item_to_payload(item: ClothingItem) -> dict:
     }
 
 
+# Quantos looks recentes viram contexto da próxima geração. Cada um é token
+# pago em TODA chamada seguinte, então o corte é baixo de propósito: o objetivo
+# é "não repita o que você acabou de sugerir", não uma memória longa.
+_RECENT_LOOKS_LIMIT = 3
+
+
+def _recent_item_ids(
+    db: Session, *, user_id: uuid.UUID, limit: int = _RECENT_LOOKS_LIMIT
+) -> list[list[str]]:
+    """
+    Lê os núcleos dos looks recentes do usuário, do mais novo para o mais antigo.
+
+    Returns:
+        Uma lista de listas de ids, no máximo `limit` entradas. Registros de
+        gerações que falharam não têm looks e simplesmente não contribuem.
+    """
+    rows = (
+        db.query(LookHistory)
+        .filter(LookHistory.user_id == user_id)
+        .order_by(desc(LookHistory.data_gerado))
+        .limit(limit)
+        .all()
+    )
+
+    recent: list[list[str]] = []
+    for row in rows:
+        payload = row.itens_sugeridos
+        if not isinstance(payload, dict):
+            continue
+        for look in payload.get("looks") or []:
+            ids = look.get("item_ids") if isinstance(look, dict) else None
+            # Um registro editado à mão (ex.: `"item_ids": 5`) não pode derrubar
+            # a geração com um TypeError na hora de iterar — daí a checagem de
+            # tipo antes de percorrer `ids`, não só de "verdadeiro".
+            if isinstance(ids, list) and ids:
+                recent.append([str(i) for i in ids])
+            if len(recent) >= limit:
+                return recent
+    return recent
+
+
 def generate_look(
     db: Session,
     *,
@@ -61,8 +102,9 @@ def generate_look(
     """
     Gera o look do dia, persiste em `looks_history` e devolve a resposta.
 
-    Degrada graciosamente: se o guarda-roupa for insuficiente, a resposta vem
-    com `looks` vazio (ou reduzido) e uma `note` explicativa — nunca um erro.
+    Degrada graciosamente em duas situações distintas, ambas com HTTP 200:
+    guarda-roupa insuficiente (nem chega a chamar a API) e API indisponível.
+    Nos dois casos a resposta vem com `looks` vazio e uma `note` explicativa.
     """
     items = list_items(db, user_id=user_id)
     items_payload = [_item_to_payload(i) for i in items]
@@ -77,6 +119,7 @@ def generate_look(
         items_payload,  # type: ignore[arg-type]
         weather,  # type: ignore[arg-type]
         ocasiao=payload.ocasiao.value,
+        recent_item_ids=_recent_item_ids(db, user_id=user_id),
     )
 
     # Índice id → peça ORM para resolver os dados de renderização.
@@ -139,8 +182,16 @@ def generate_look(
         itens_sugeridos={"looks": persisted_looks, "note": result.get("note")},
         justificativa=justificativa or None,
     )
-    db.add(history)
-    db.commit()
+    # Persistência é auditoria, não o produto: os looks já foram compostos (e
+    # pagos) quando chegamos aqui. Se o commit falhar (conexão caiu, pool
+    # esgotado, uma constraint), o erro é registrado mas NUNCA pode jogar fora
+    # um resultado que já saiu do bolso do dono do projeto.
+    try:
+        db.add(history)
+        db.commit()
+    except Exception:
+        logger.exception("Falha ao persistir looks_history — resposta é devolvida mesmo assim.")
+        db.rollback()
 
     return GenerateLookResponse(
         condicoes_climaticas=payload.condicoes_climaticas,

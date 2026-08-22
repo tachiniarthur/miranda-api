@@ -1,10 +1,12 @@
 """
 Rotas do "look do dia".
 
-A composição é determinística (services/ai/look_generation) — sem LLM nem API
-paga. A rota chama a geração, persiste o registro e devolve os looks. Quando o
-guarda-roupa é insuficiente, a resposta vem com `looks` vazio/reduzido e uma
-`note` explicativa (nunca um erro).
+A composição usa a API do Claude (services/ai/look_generation), precedida de um
+pré-filtro determinístico e gratuito por clima e ocasião. A rota chama a
+geração, persiste o registro e devolve os looks.
+
+Nunca devolve erro por falta de peças nem por indisponibilidade da API: nesses
+casos a resposta vem com `looks` vazio e uma `note` explicativa, em HTTP 200.
 """
 
 from __future__ import annotations

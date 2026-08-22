@@ -60,15 +60,15 @@ class LookSuggestionPublic(BaseModel):
 
 
 class GenerateLookResponse(BaseModel):
-    """Resposta da geração de look (composição determinística por regras)."""
+    """Resposta da geração de look (pré-filtro determinístico + API do Claude)."""
 
     condicoes_climaticas: list[CondicaoClimatica]
     ocasiao: Ocasiao
     temperatura_min: float
     temperatura_max: float
     looks: list[LookSuggestionPublic]
-    # Nota opcional quando o guarda-roupa está limitado para o clima ou para a
-    # ocasião informada.
+    # Nota opcional: guarda-roupa limitado para o clima ou para a ocasião, ou a
+    # explicação de que não foi possível gerar agora.
     note: str | None = None
 
 
