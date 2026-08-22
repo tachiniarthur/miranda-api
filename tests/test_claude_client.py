@@ -144,7 +144,7 @@ def test_missing_key_is_fatal_and_never_touches_the_network(monkeypatch):
     assert fake.messages.calls == []
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 529])
+@pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503, 529])
 def test_rate_limit_and_server_errors_are_transient(monkeypatch, status):
     _install(monkeypatch, _api_error(status))
     with pytest.raises(LookApiTransient):
@@ -195,11 +195,37 @@ def test_typed_client_errors_are_fatal(monkeypatch, cls, status):
 
 
 def test_a_response_without_text_is_transient(monkeypatch):
-    """Resposta cortada por max_tokens ou recusa: vazia, mas vale retentar."""
+    """
+    Resposta vazia com `stop_reason` que NÃO é `max_tokens` nem `refusal` (ex.:
+    um `end_turn` sem bloco de texto, uma anomalia do SDK) ainda é tratada como
+    transitória — os dois casos determinísticos têm cláusula própria acima e
+    são fatais, não retentáveis (ver os testes logo abaixo).
+    """
     response = _Response()
     response.content = []
     _install(monkeypatch, response)
     with pytest.raises(LookApiTransient):
+        request_composition("sys", "user", {"type": "object"})
+
+
+# ── stop_reason determinístico: max_tokens e refusal são FATAIS ────────────
+# Retentar uma resposta cortada por `max_tokens` ou uma recusa gasta a chamada
+# inteira (até o teto de ANTHROPIC_MAX_OUTPUT_TOKENS) três vezes sem chance de
+# um resultado diferente — os dois precisam desistir na primeira tentativa.
+def test_max_tokens_stop_reason_is_fatal_not_retried(monkeypatch):
+    response = _Response(text="")
+    response.stop_reason = "max_tokens"
+    _install(monkeypatch, response)
+    with pytest.raises(LookApiFatal, match="ANTHROPIC_MAX_OUTPUT_TOKENS"):
+        request_composition("sys", "user", {"type": "object"})
+
+
+def test_refusal_stop_reason_is_fatal_not_retried(monkeypatch):
+    response = _Response(text="")
+    response.content = []  # recusa: HTTP 200 sem bloco de texto
+    response.stop_reason = "refusal"
+    _install(monkeypatch, response)
+    with pytest.raises(LookApiFatal, match="refusal"):
         request_composition("sys", "user", {"type": "object"})
 
 

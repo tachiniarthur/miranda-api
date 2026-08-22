@@ -1,43 +1,30 @@
 """
 Perfis de ocasião — o que "reunião" ou "shopping" significam para a composição.
 
-Este módulo é a tradução de um evento humano ("jantar romântico") em parâmetros
-que o motor determinístico de `look_generation.py` sabe aplicar. Sem LLM: cada
-ocasião é uma linha de uma tabela auditável e ajustável.
+Este módulo é a tradução de um evento humano ("jantar romântico") em uma linha
+de tabela auditável e ajustável. Desde a migração para a API do Claude, o que
+chega VIVO à composição são só três coisas:
 
-── Por que um PERFIL e não só um alvo de formalidade ────────────────────────
-Se ocasião fosse apenas um alvo na escala `esporte(0) · casual(1) ·
-smart_casual(2) · social(3)`, metade das opções colapsaria: shopping, dia a dia
-e faculdade seriam todas `casual` e produziriam exatamente o mesmo look. A
-granularidade seria cosmética — o usuário escolheria coisas diferentes e
-receberia a mesma resposta.
+  · `forbidden_categories` — pré-filtro gratuito e INVIOLÁVEL, aplicado em
+    `look_generation._drop_forbidden` antes de qualquer chamada paga. Nunca é
+    relaxado, nem em guarda-roupa pobre: é preferível não montar um look de
+    academia a sugerir um blazer. `_structure_is_valid` reconfere isso na
+    saída do modelo (defesa em profundidade — ver o comentário lá).
+  · `label` e `phrase` — texto que vai para o modelo como CONTEXTO
+    (`build_user_message` usa `label`; a nota de guarda-roupa insuficiente em
+    `look_generation.generate_daily_look` usa `phrase`).
 
-Por isso cada ocasião tem CINCO dimensões independentes, e cada par de ocasiões
-difere em ao menos uma delas:
-
-  1. `formality_target` / `formality_tolerance` — onde o look deve cair na
-     escala e quanto de desvio ainda conta como "no registro".
-  2. `comfort_bias` — o quanto a ocasião envolve ficar de pé/andar. Penaliza
-     peça pesada quando o clima não exige (shopping e viagem, não reunião).
-  3. `layering_bias` — o quanto a ocasião pede sobreposição INDEPENDENTE do
-     clima (blazer de reunião, casaco de avião, camada de sala com ar).
-  4. `color_discipline` — "neutro" (nenhuma cor forte: entrevista, reunião),
-     "livre" (no máximo uma, o padrão) ou "destaque" (no máximo uma, e ter uma
-     é premiado: jantar romântico, evento formal).
-  5. `category_bonus` / `forbidden_categories` — o que a ocasião favorece
-     (vestido num jantar, blazer numa entrevista) e o que ela simplesmente não
-     admite (blazer na academia).
-
-── Proibição vs. registro ───────────────────────────────────────────────────
-As duas restrições têm forças diferentes de propósito:
-
-  · `forbidden_categories` é INVIOLÁVEL. Nunca é relaxada, nem em guarda-roupa
-    pobre — é preferível não montar um look de academia a sugerir um blazer.
-    A rede de segurança em `_structure_is_valid` reconfere isso na saída da API.
-  · `formality_target` é uma PREFERÊNCIA FORTE. Se o guarda-roupa não tem o
-    registro pedido, a composição relaxa e devolve o melhor possível junto de
-    uma nota explicando o que faltou — a mesma degradação graciosa que o
-    pré-filtro térmico já pratica.
+Os demais campos do dataclass — `formality_target`, `formality_tolerance`,
+`comfort_bias`, `layering_bias`, `color_discipline`, `category_bonus`,
+`wants_accessory` — são MANTIDOS mas hoje INERTES: nenhum código os lê. Eles
+eram os parâmetros do antigo motor de regras (composição por pontuação de cor e
+formalidade, justificativas por template), removido nesta migração porque
+delegar a decisão de moda ao modelo tornou esse motor redundante. Continuam na
+tabela porque a ocasião é um parâmetro de produto que pode precisar deles de
+novo — apagar os valores calibrados seria jogar fora trabalho que já foi feito.
+Não altere os valores destes campos sem necessidade: eles não fazem nada hoje,
+mas uma eventual reintrodução do motor de regras depende de estarem certos
+quando (se) voltarem a ser lidos.
 """
 
 from __future__ import annotations
@@ -81,7 +68,8 @@ class OccasionProfile:
 
     color_discipline: str
 
-    # Trecho usado nos templates de justificativa ("Para {phrase}, ...").
+    # Live: vai para o modelo como contexto (ex.: na nota de guarda-roupa
+    # insuficiente montada em `look_generation.generate_daily_look`).
     phrase: str
 
     category_bonus: dict[str, float] = field(default_factory=dict)

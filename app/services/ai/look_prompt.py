@@ -233,16 +233,23 @@ def build_user_message(
     weather: dict[str, Any],
     ocasiao_label: str,
     recent_item_ids: list[list[str]],
+    thermally_relaxed: bool = False,
 ) -> str:
     """
     Monta a mensagem de usuário de uma composição.
 
     Args:
-        pieces: subconjunto JÁ filtrado pelo clima (ver `look_generation`).
+        pieces: subconjunto enviado pela etapa 1 (ver `look_generation`) — só
+            filtrado pelo clima quando `thermally_relaxed` for `False`.
         weather: `temperatura_min`, `temperatura_max` e a lista `condicoes`.
         ocasiao_label: rótulo legível da ocasião (ex.: "Jantar romântico").
         recent_item_ids: núcleos dos looks recentes do usuário, cada um como uma
             lista de ids. Lista vazia quando não há histórico.
+        thermally_relaxed: `True` quando o pré-filtro térmico não deixou nenhum
+            núcleo possível e `look_generation` caiu de volta ao guarda-roupa SEM
+            aquele filtro. Nesse caso o cabeçalho do catálogo muda: dizer "já
+            filtrado pelo clima" seria falso e levaria o modelo a defender uma
+            peça termicamente errada como se ela coubesse no dia.
 
     Returns:
         Texto pronto para o papel "user". O JSON vai COMPACTO (sem indentação):
@@ -253,13 +260,22 @@ def build_user_message(
         [_compact_piece(p) for p in pieces], ensure_ascii=False, separators=(",", ":")
     )
 
+    if thermally_relaxed:
+        catalog_header = (
+            "GUARDA-ROUPA DISPONÍVEL (ATENÇÃO: o acervo não tem peças no peso "
+            "térmico deste dia; estas NÃO foram filtradas pelo clima — escolha "
+            "as menos inadequadas e diga isso na nota)"
+        )
+    else:
+        catalog_header = "GUARDA-ROUPA DISPONÍVEL (já filtrado pelo clima)"
+
     blocks = [
         f"OCASIÃO: {ocasiao_label}",
         (
             f"CLIMA DO DIA: mínima {weather['temperatura_min']}°C, "
             f"máxima {weather['temperatura_max']}°C, condições: {condicoes}"
         ),
-        f"GUARDA-ROUPA DISPONÍVEL (já filtrado pelo clima):\n{catalog}",
+        f"{catalog_header}:\n{catalog}",
     ]
 
     if recent_item_ids:

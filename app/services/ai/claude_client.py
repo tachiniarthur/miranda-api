@@ -172,8 +172,11 @@ def request_composition(
         # uma subclasse, mesmo com status_code=429. Por isso o 429 é checado aqui
         # explicitamente, e não apenas via `except anthropic.RateLimitError`
         # acima: sem isso, um 429 que chegasse como `APIStatusError` genérico
-        # cairia no `else` e viraria `LookApiFatal` por engano.
-        if exc.status_code == 429 or exc.status_code >= 500:
+        # cairia no `else` e viraria `LookApiFatal` por engano. 408 (timeout do
+        # proxy) e 409 (conflito) entram na mesma lista porque é isso que a
+        # própria política de retry do SDK da Anthropic considera retentável —
+        # replicamos aqui, não inventamos.
+        if exc.status_code in (408, 409, 429) or exc.status_code >= 500:
             raise LookApiTransient(f"Erro do servidor ({exc.status_code}): {exc}") from exc
         raise LookApiFatal(f"Erro da API ({exc.status_code}): {exc}") from exc
     except (anthropic.APIConnectionError, anthropic.APITimeoutError) as exc:
@@ -203,13 +206,31 @@ def request_composition(
             model,
         )
 
+    # `stop_reason` é conferido ANTES de extrair o texto: `max_tokens` e
+    # `refusal` são determinísticos — repetir a mesma chamada produz o mesmo
+    # resultado — então tratá-los como transitórios queimaria até 3 tentativas
+    # inteiras (cada uma no teto de `ANTHROPIC_MAX_OUTPUT_TOKENS`) num caminho
+    # garantido a não dar em nada. `getattr` porque os dublês de teste nem
+    # sempre definem o atributo.
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        raise LookApiFatal(
+            "A resposta da API foi cortada por atingir o limite de tokens de "
+            "saída (stop_reason=max_tokens). Aumente ANTHROPIC_MAX_OUTPUT_TOKENS "
+            "— retentar com o mesmo limite produziria o mesmo corte."
+        )
+    if stop_reason == "refusal":
+        raise LookApiFatal(
+            "A API recusou a requisição (stop_reason=refusal). Recusa é "
+            "determinística: retentar não muda o resultado."
+        )
+
     text = next(
         (b.text for b in response.content if getattr(b, "type", None) == "text"), ""
     )
     if not text.strip():
         raise LookApiTransient(
-            f"A API respondeu sem texto (stop_reason="
-            f"{getattr(response, 'stop_reason', '?')})."
+            f"A API respondeu sem texto (stop_reason={stop_reason!r})."
         )
 
     return ClaudeReply(text=text, usage=usage)

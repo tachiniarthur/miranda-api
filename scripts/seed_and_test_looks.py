@@ -1,4 +1,8 @@
 """
+CUSTA DINHEIRO: chama `look_service.generate_look` até 4 vezes, e cada chamada
+faz até 3 tentativas contra a API do Claude — até 12 chamadas pagas por
+execução. Não rode em loop nem em CI.
+
 Semeia um guarda-roupa de demonstração para o usuário de teste e exercita a
 geração de look em dois cenários de clima, verificando a persistência em
 looks_history.

@@ -15,6 +15,7 @@ continua self-hosted e gratuita — são coisas diferentes. Ver README, seção 
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from sqlalchemy import desc
@@ -32,13 +33,7 @@ from app.services.ai.look_generation import generate_daily_look
 from app.services.storage import authenticated_image_url
 from app.services.wardrobe_service import list_items
 
-
-class LookNotAvailableError(Exception):
-    """Erro de negócio (reservado para indisponibilidade genérica da geração)."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
+logger = logging.getLogger("miranda.look_service")
 
 
 def _item_to_payload(item: ClothingItem) -> dict:
@@ -88,7 +83,10 @@ def _recent_item_ids(
             continue
         for look in payload.get("looks") or []:
             ids = look.get("item_ids") if isinstance(look, dict) else None
-            if ids:
+            # Um registro editado à mão (ex.: `"item_ids": 5`) não pode derrubar
+            # a geração com um TypeError na hora de iterar — daí a checagem de
+            # tipo antes de percorrer `ids`, não só de "verdadeiro".
+            if isinstance(ids, list) and ids:
                 recent.append([str(i) for i in ids])
             if len(recent) >= limit:
                 return recent
@@ -184,8 +182,16 @@ def generate_look(
         itens_sugeridos={"looks": persisted_looks, "note": result.get("note")},
         justificativa=justificativa or None,
     )
-    db.add(history)
-    db.commit()
+    # Persistência é auditoria, não o produto: os looks já foram compostos (e
+    # pagos) quando chegamos aqui. Se o commit falhar (conexão caiu, pool
+    # esgotado, uma constraint), o erro é registrado mas NUNCA pode jogar fora
+    # um resultado que já saiu do bolso do dono do projeto.
+    try:
+        db.add(history)
+        db.commit()
+    except Exception:
+        logger.exception("Falha ao persistir looks_history — resposta é devolvida mesmo assim.")
+        db.rollback()
 
     return GenerateLookResponse(
         condicoes_climaticas=payload.condicoes_climaticas,

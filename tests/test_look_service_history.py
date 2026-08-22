@@ -94,6 +94,17 @@ def test_a_failed_generation_contributes_nothing(db, user):
     assert _recent_item_ids(db, user_id=user.id) == []
 
 
+def test_a_malformed_item_ids_field_does_not_crash(db, user):
+    """
+    Uma linha editada à mão com `"item_ids": 5` (não uma lista) não pode
+    derrubar a geração com um TypeError ao tentar iterar um int — a linha
+    malformada é simplesmente ignorada, como qualquer outro registro sem
+    contexto aproveitável.
+    """
+    _record(db, user, [{"label": "I", "item_ids": 5, "commentary": "c"}])
+    assert _recent_item_ids(db, user_id=user.id) == []
+
+
 def test_another_users_history_is_never_leaked(db, user):
     other = User(
         name="Outra",
@@ -211,6 +222,110 @@ def test_generate_look_persists_a_history_row_and_resolves_images(db, monkeypatc
         assert set(persisted_looks[0]["item_ids"]) == {bottom_id, top_id}
         assert persisted_looks[0]["commentary"] == commentary
         assert commentary in row.justificativa
+    finally:
+        db.query(LookHistory).filter(LookHistory.user_id == owner.id).delete()
+        db.query(ClothingItem).filter(ClothingItem.user_id == owner.id).delete()
+        db.delete(owner)
+        db.commit()
+
+
+def test_a_persistence_failure_does_not_destroy_a_paid_result(db, monkeypatch):
+    """
+    Os looks já foram compostos (e pagos) quando chegamos em `db.commit()`. Se
+    o commit falhar — conexão caiu, pool esgotado, uma constraint —, a resposta
+    já pronta não pode ser jogada fora: persistência é auditoria, não o
+    produto. Este teste força o commit a estourar e confere que a resposta
+    ainda volta com os looks intactos (e que nenhuma linha órfã fica gravada).
+    """
+    owner = User(
+        name="Dona da Falha de Persistência",
+        email=f"persist-fail-{uuid.uuid4().hex}@exemplo.com",
+        hashed_password="$2b$12$" + "x" * 53,
+    )
+    db.add(owner)
+    db.commit()
+    db.refresh(owner)
+
+    bottom = ClothingItem(
+        user_id=owner.id,
+        name="Calça preta de teste",
+        category=ClothingCategory.CALCA,
+        image_path="clothing_images/teste-calca.png",
+        cor_primaria="preto",
+        formalidade=Formalidade.CASUAL,
+        peso_termico=PesoTermico.MEDIO,
+        serve_chuva=False,
+    )
+    top = ClothingItem(
+        user_id=owner.id,
+        name="Camisa branca de teste",
+        category=ClothingCategory.CAMISA,
+        image_path="clothing_images/teste-camisa.png",
+        cor_primaria="branco",
+        formalidade=Formalidade.CASUAL,
+        peso_termico=PesoTermico.LEVE,
+        serve_chuva=False,
+    )
+    db.add_all([bottom, top])
+    db.commit()
+
+    bottom_id, top_id = str(bottom.id), str(top.id)
+    commentary = "Calça preta e camisa branca compõem o básico do dia ameno."
+    reply_text = json.dumps({
+        "looks": [{
+            "label": "I",
+            "items": [
+                {"item_id": bottom_id, "role": "peça de baixo"},
+                {"item_id": top_id, "role": "peça de cima"},
+            ],
+            "commentary": commentary,
+        }],
+        "note": None,
+    }, ensure_ascii=False)
+
+    def fake_request_composition(system, user_message, schema):
+        return ClaudeReply(
+            text=reply_text,
+            usage=ClaudeUsage(input_tokens=10, output_tokens=20, model="claude-opus-5"),
+        )
+
+    monkeypatch.setattr(
+        look_generation.claude_client, "request_composition", fake_request_composition
+    )
+
+    # `db.commit()` estoura na PRIMEIRA chamada feita depois daqui (a de
+    # `look_service.generate_look`) e depois se restaura sozinho, para a
+    # limpeza no `finally` funcionar normalmente.
+    original_commit = db.commit
+
+    def failing_commit():
+        monkeypatch.setattr(db, "commit", original_commit)
+        raise RuntimeError("commit falhou (dublê) — conexão caiu")
+
+    monkeypatch.setattr(db, "commit", failing_commit)
+
+    try:
+        payload = GenerateLookRequest(
+            temperatura_min=16.0,
+            temperatura_max=24.0,
+            condicoes_climaticas=[CondicaoClimatica.SOL],
+            ocasiao=Ocasiao.DIA_A_DIA,
+        )
+        response = look_service.generate_look(db, user_id=owner.id, payload=payload)
+
+        # A resposta paga sobrevive à falha de persistência.
+        assert len(response.looks) == 1
+        look = response.looks[0]
+        assert {i.item_id for i in look.items} == {bottom.id, top.id}
+        assert look.commentary == commentary
+
+        # E nenhuma linha órfã/parcial fica gravada — o commit realmente falhou.
+        rows = (
+            db.query(LookHistory)
+            .filter(LookHistory.user_id == owner.id)
+            .all()
+        )
+        assert rows == []
     finally:
         db.query(LookHistory).filter(LookHistory.user_id == owner.id).delete()
         db.query(ClothingItem).filter(ClothingItem.user_id == owner.id).delete()

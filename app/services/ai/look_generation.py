@@ -246,6 +246,13 @@ def _structure_is_valid(
     Returns:
         (válido, motivo). O motivo entra no log quando um look é descartado.
     """
+    # Defesa em profundidade, não proteção contra o modelo: `categories` vem de
+    # `by_id`, que descende do `selection` já filtrado por `_drop_forbidden`. Um
+    # id fora daquele subconjunto já teria sido rejeitado antes de chegar aqui
+    # (ver `_parse_reply`), então numa requisição real esta condição nunca
+    # dispara. Ela existe para um FUTURO chamador que monte `by_id` sem passar
+    # pelo pré-filtro — aí sim esta linha é a única coisa entre ele e uma
+    # categoria proibida na tela.
     if profile.forbidden_categories and (set(categories) & profile.forbidden_categories):
         return False, f"categoria proibida em {profile.key}"
 
@@ -414,10 +421,12 @@ def generate_daily_look(
     # Uma única relaxação: se o corte térmico não deixa nem um núcleo possível,
     # é melhor vestir a pessoa com o que ela tem e avisar do descompasso do que
     # devolver a tela vazia. A proibição da ocasião NÃO participa disso.
+    thermally_relaxed = False
     if _have_core(_partition(thermal)):
         selection = thermal
     elif _have_core(_partition(allowed)):
         selection = allowed
+        thermally_relaxed = True
         notes.append(
             "Poucas peças combinam com esta temperatura; ampliei a seleção para "
             "conseguir compor."
@@ -452,7 +461,11 @@ def generate_daily_look(
             # rede de segurança do resto da etapa 2.
             by_id = {str(p["id"]): p for p in selection}
             user_message = build_user_message(
-                selection, dict(weather), profile.label, recent_item_ids or []
+                selection,
+                dict(weather),
+                profile.label,
+                recent_item_ids or [],
+                thermally_relaxed=thermally_relaxed,
             )
             reply = claude_client.request_composition(
                 MIRANDA_SYSTEM_PROMPT, user_message, LOOK_RESPONSE_SCHEMA

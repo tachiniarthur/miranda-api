@@ -26,6 +26,7 @@ from app.services.ai.claude_client import (
     LookApiFatal,
     LookApiTransient,
 )
+from app.services.ai.look_prompt import build_user_message
 from app.services.ai.look_generation import (
     ACCEPTABLE_PESO,
     BAND_COLD,
@@ -420,13 +421,48 @@ def test_degradation_never_raises(monkeypatch):
 def test_the_relaxation_note_explains_a_wardrobe_that_did_not_fit_the_day(monkeypatch):
     """Só peça pesada num dia quente: o filtro cede e a nota diz que cedeu."""
     heavy_only = [piece("b9", "calca", peso="pesado"), piece("t9", "malha", peso="pesado")]
-    _stub_api(monkeypatch, [reply([dict(VALID_LOOK, items=[
+    calls = _stub_api(monkeypatch, [reply([dict(VALID_LOOK, items=[
         {"item_id": "b9", "role": "peça de baixo"},
         {"item_id": "t9", "role": "peça de cima"},
     ])])])
     result = generate_daily_look(heavy_only, HOT_DAY, ocasiao="dia_a_dia")
     assert result["looks"]
     assert "temperatura" in (result["note"] or "").lower()
+    # A mensagem enviada ao modelo tem que ser honesta sobre o relaxamento —
+    # ver test_build_user_message_header_honesty_by_relaxation_flag abaixo.
+    assert "ATENÇÃO" in calls[0]["user_message"]
+    assert "NÃO foram filtradas pelo clima" in calls[0]["user_message"]
+
+
+def test_a_normal_call_uses_the_trusted_thermal_header(monkeypatch):
+    """Fora da relaxação, o cabeçalho continua afirmando o filtro térmico."""
+    calls = _stub_api(monkeypatch, [reply([VALID_LOOK])])
+    generate_daily_look(WARDROBE, MILD_DAY, ocasiao="dia_a_dia")
+    sent = calls[0]["user_message"]
+    assert "já filtrado pelo clima" in sent
+    assert "ATENÇÃO" not in sent
+
+
+# ── Cabeçalho do catálogo — honestidade sobre o filtro térmico ─────────────
+def test_build_user_message_header_honesty_by_relaxation_flag():
+    """
+    `look_prompt.build_user_message` não pode dizer "já filtrado pelo clima"
+    quando `look_generation` caiu no ramo de relaxamento térmico — o modelo
+    defenderia editorialmente uma peça termicamente errada como se coubesse
+    no dia. `thermally_relaxed` decide qual cabeçalho vai.
+    """
+    trusted = build_user_message(WARDROBE, MILD_DAY, "Dia a dia", [])
+    assert "GUARDA-ROUPA DISPONÍVEL (já filtrado pelo clima)" in trusted
+    assert "ATENÇÃO" not in trusted
+
+    relaxed = build_user_message(
+        WARDROBE, HOT_DAY, "Dia a dia", [], thermally_relaxed=True
+    )
+    assert (
+        "GUARDA-ROUPA DISPONÍVEL (ATENÇÃO: o acervo não tem peças no peso "
+        "térmico deste dia; estas NÃO foram filtradas pelo clima — escolha "
+        "as menos inadequadas e diga isso na nota)"
+    ) in relaxed
 
 
 def test_recent_looks_reach_the_prompt(monkeypatch):
