@@ -57,26 +57,37 @@ def _send_console(message: EmailMessage) -> bool:
 
 
 def _send_smtp(message: EmailMessage) -> bool:
-    mime = _MIMEMessage()
-    mime["From"] = settings.EMAIL_FROM
-    mime["To"] = message.to
-    mime["Subject"] = message.subject
-    mime.set_content(message.text)
-
     try:
+        # A construção do MIME entra no try de propósito: um nome de exibição
+        # digitado pelo usuário (ex.: `render_password_reset(user.name, ...)`)
+        # pode conter um surrogate solto ou uma quebra de linha, e tanto
+        # `set_content` quanto a atribuição de cabeçalho levantam nesse caso
+        # (UnicodeEncodeError, ValueError). Isso não é diferente, para quem
+        # chamou, de um SMTP fora do ar: o cadastro não pode cair por causa
+        # disso.
+        mime = _MIMEMessage()
+        mime["From"] = settings.EMAIL_FROM
+        mime["To"] = message.to
+        mime["Subject"] = message.subject
+        mime.set_content(message.text)
+
         with smtplib.SMTP(
             settings.SMTP_HOST, settings.SMTP_PORT, timeout=_TIMEOUT_SECONDS
         ) as smtp:
             smtp.send_message(mime)
     except Exception as exc:  # noqa: BLE001
         # Largo de propósito: smtplib levanta uma família grande (OSError,
-        # SMTPException, socket.timeout...) e nenhuma delas justifica derrubar
-        # o cadastro de quem está do outro lado.
+        # SMTPException, socket.timeout...) e a própria construção do MIME
+        # pode levantar (UnicodeEncodeError, ValueError) — nenhuma delas
+        # justifica derrubar o cadastro de quem está do outro lado. O tipo da
+        # exceção vai no log para o operador distinguir "mensagem malformada"
+        # de "servidor fora do ar".
         logger.warning(
-            "Falha ao enviar e-mail por SMTP (%s:%s) para %s: %s",
+            "Falha ao enviar e-mail por SMTP (%s:%s) para %s: %s: %s",
             settings.SMTP_HOST,
             settings.SMTP_PORT,
             message.to,
+            type(exc).__name__,
             exc,
         )
         return False
@@ -110,12 +121,20 @@ def _send_resend(message: EmailMessage) -> bool:
 
     if response.status_code >= 300:
         # O caso mais comum aqui é domínio não verificado, que o Resend recusa
-        # com 4xx. A mensagem da API é útil e vai inteira para o log.
+        # com 4xx. A mensagem da API é útil e vai inteira para o log — mas
+        # `.text` decodifica o corpo da resposta na hora, o que também pode
+        # levantar (corpo mal-formado), e isso já está fora do try/except que
+        # cerca `httpx.post`. Mesma regra: um corpo problemático não pode virar
+        # HTTP 500 numa rota de auth.
+        try:
+            body = response.text
+        except Exception as exc:  # noqa: BLE001
+            body = f"<corpo ilegível: {type(exc).__name__}: {exc}>"
         logger.warning(
             "Resend recusou o envio para %s (HTTP %s): %s",
             message.to,
             response.status_code,
-            response.text,
+            body,
         )
         return False
 

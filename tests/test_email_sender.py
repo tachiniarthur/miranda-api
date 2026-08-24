@@ -90,6 +90,34 @@ def test_smtp_failure_is_swallowed_and_logged(monkeypatch, msg, caplog):
     assert "connection refused" in caplog.text
 
 
+def test_a_malformed_display_name_cannot_take_down_a_signup(monkeypatch, caplog):
+    """
+    Um nome de exibição digitado no cadastro (`user.name`) entra na mensagem
+    via f-string, sem validação nenhuma — diferente do endereço, que passa por
+    `email-validator`. Um surrogate solto (ex.: metade de um emoji corrompido)
+    faz `EmailMessage.set_content` levantar `UnicodeEncodeError`. Isso não pode
+    virar HTTP 500 na rota de reset de senha.
+    """
+    bad_msg = EmailMessage(to="alguem@exemplo.com", subject="Assunto", text="Olá " + chr(0xD800))
+    _backend(monkeypatch, "smtp", SMTP_HOST="localhost", SMTP_PORT=1025)
+
+    with caplog.at_level(logging.WARNING, logger="miranda.email"):
+        assert send_email(bad_msg) is False
+
+
+def test_a_linefeed_in_the_recipient_cannot_take_down_a_signup(monkeypatch, caplog):
+    """
+    Mesma classe de bug, outro campo: um `to` com quebra de linha (injeção de
+    cabeçalho) faz a atribuição do cabeçalho MIME levantar `ValueError`. Isso
+    também não pode escapar de `send_email`.
+    """
+    bad_msg = EmailMessage(to="alguem@exemplo.com\nBcc: outro@exemplo.com", subject="Assunto", text="Corpo")
+    _backend(monkeypatch, "smtp", SMTP_HOST="localhost", SMTP_PORT=1025)
+
+    with caplog.at_level(logging.WARNING, logger="miranda.email"):
+        assert send_email(bad_msg) is False
+
+
 # ── Backend Resend ──────────────────────────────────────────────────────────
 def test_resend_backend_posts_to_the_api(monkeypatch, msg):
     captured = {}
@@ -129,6 +157,25 @@ def test_resend_error_status_is_a_failure_not_an_exception(monkeypatch, msg):
     class _Resp:
         status_code = 422
         text = '{"message":"domain not verified"}'
+
+    _backend(monkeypatch, "resend", RESEND_API_KEY="re_x")
+    monkeypatch.setattr(sender.httpx, "post", lambda *a, **k: _Resp())
+    assert send_email(msg) is False
+
+
+def test_an_unreadable_resend_response_body_cannot_take_down_a_signup(monkeypatch, msg):
+    """
+    `.text` decodifica o corpo da resposta na hora em que é lido — fora do
+    try/except que cerca `httpx.post`. Um corpo mal-formado (encoding
+    inconsistente com o `Content-Type` declarado, por exemplo) faz a leitura
+    levantar. Mesma regra do módulo inteiro: isso vira False, não exceção.
+    """
+    class _Resp:
+        status_code = 422
+
+        @property
+        def text(self):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     _backend(monkeypatch, "resend", RESEND_API_KEY="re_x")
     monkeypatch.setattr(sender.httpx, "post", lambda *a, **k: _Resp())
