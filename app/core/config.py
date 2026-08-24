@@ -150,6 +150,28 @@ class Settings(BaseSettings):
     # conta, não o de cada pessoa. Ver README, seção 12.
     ENABLE_PROMPT_CACHE: bool = False
 
+    # ── Envio de e-mail ───────────────────────────────────────────────
+    # Três backends, trocados por variável — nenhum código muda ao hospedar:
+    #   console — só registra no log. Padrão, e o que roda nos testes.
+    #   smtp    — Mailpit local (docker compose up -d). Captura tudo numa caixa
+    #             web em http://localhost:8025 e NÃO envia nada para fora.
+    #   resend  — serviço transacional real. Exige RESEND_API_KEY e, para
+    #             enviar a endereços que não sejam o seu, um domínio verificado.
+    #
+    # O padrão é `console` de propósito: a aplicação precisa subir e funcionar
+    # numa máquina sem Docker e sem conta em serviço nenhum.
+    EMAIL_BACKEND: str = "console"
+    EMAIL_FROM: str = "Miranda <nao-responda@miranda.local>"
+
+    SMTP_HOST: str = "localhost"
+    SMTP_PORT: int = 1025
+
+    RESEND_API_KEY: str = ""
+
+    # Base das URLs que vão DENTRO dos e-mails (o frontend, não a API). É o que
+    # o usuário clica, então precisa ser o endereço público do app.
+    APP_BASE_URL: str = "http://localhost:3000"
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")
