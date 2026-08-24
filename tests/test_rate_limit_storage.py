@@ -64,3 +64,18 @@ def test_redis_acessivel_e_usado_como_esta():
     assert rate_limit.resolve_storage_uri("redis://localhost:6379/0") == (
         "redis://localhost:6379/0"
     )
+
+
+def test_a_senha_do_redis_nao_vai_para_o_log(caplog):
+    """
+    `redis://usuario:senha@host` é forma válida e comum em produção (Redis
+    gerenciado). O aviso de indisponibilidade não pode carregar a senha para o
+    log — é o mesmo erro que o token de redefinição já custou a sair de lá.
+    """
+    uri = "redis://usuario:senha-secretissima@127.0.0.1:1/0"
+    with caplog.at_level(logging.WARNING, logger="miranda.rate_limit"):
+        assert rate_limit.resolve_storage_uri(uri) == "memory://"
+
+    assert "senha-secretissima" not in caplog.text
+    assert "usuario" not in caplog.text
+    assert "127.0.0.1:1" in caplog.text, "o host precisa continuar no aviso"

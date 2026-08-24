@@ -25,6 +25,7 @@ de palpites de token que uma origem consegue dar.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -81,6 +82,27 @@ async def stash_auth_identity(request: Request) -> None:
             setattr(request.state, _EMAIL_STATE_ATTR, email.strip().lower())
 
 
+def _uri_sem_segredo(uri: str) -> str:
+    """
+    Devolve a URI sem usuário e senha, para poder ir ao log.
+
+    `redis://usuario:senha@host:6379/0` é uma forma válida e comum em produção
+    (Redis gerenciado). Logar a URI crua deixaria a senha em texto puro no log
+    do servidor — o mesmo erro que o token de redefinição de senha já custou a
+    tirar de lá.
+    """
+    try:
+        partes = urlsplit(uri)
+    except ValueError:
+        return "<uri ilegível>"
+    if not partes.hostname:
+        return uri
+    porta = f":{partes.port}" if partes.port else ""
+    return urlunsplit(
+        (partes.scheme, f"{partes.hostname}{porta}", partes.path, "", "")
+    )
+
+
 def resolve_storage_uri(uri: str | None = None) -> str:
     """
     Devolve a URI de storage a usar, confirmando que o Redis responde.
@@ -99,11 +121,16 @@ def resolve_storage_uri(uri: str | None = None) -> str:
 
         redis.Redis.from_url(uri, socket_connect_timeout=1).ping()
     except Exception as exc:  # noqa: BLE001
+        # A queda para memória é DELIBERADA e não desliga o limite: cada worker
+        # passa a ter a própria cota, o que é mais frouxo que o configurado mas
+        # continua barrando força bruta. A alternativa seria HTTP 500 em toda
+        # rota de autenticação sempre que o Redis piscasse — uma indisponi-
+        # bilidade completa do login para evitar um limite mais folgado.
         logger.warning(
             "Redis inacessível em %s (%s). O rate limit cai para memory:// — "
             "correto com UM worker apenas. Suba o Redis com "
             "`docker compose up -d`.",
-            uri,
+            _uri_sem_segredo(uri),
             exc,
         )
         return "memory://"
