@@ -172,6 +172,26 @@ class Settings(BaseSettings):
     # o usuário clica, então precisa ser o endereço público do app.
     APP_BASE_URL: str = "http://localhost:3000"
 
+    # ── Verificação de e-mail ─────────────────────────────────────────
+    # Exigir e-mail verificado para entrar.
+    #
+    # DESLIGADO por padrão, e isso é deliberado. Ligar isto torna a aplicação
+    # inutilizável se o servidor de e-mail não estiver de pé — uma trava que
+    # depende de um contêiner rodando é uma trava que prende o dono do projeto.
+    # Além disso, as contas criadas ANTES desta feature não têm como ter
+    # verificado nada e ficariam trancadas para fora.
+    #
+    # Ligue quando houver entrega de e-mail confiável (EMAIL_BACKEND=resend com
+    # domínio verificado) e depois de verificar as contas que já existem.
+    #
+    # ⚠️ Com a flag LIGADA, `POST /api/auth/register` responde 403 em vez de
+    # devolver token: a conta é criada e o e-mail sai, mas o login embutido no
+    # cadastro esbarra na mesma trava. O frontend precisa tratar esse 403 como
+    # "confirme seu e-mail" antes de a flag ser ligada em produção.
+    REQUIRE_VERIFIED_EMAIL: bool = False
+
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")

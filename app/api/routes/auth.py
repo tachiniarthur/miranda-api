@@ -24,8 +24,10 @@ from app.schemas.auth import (
     LoginRequest,
     MessageResponse,
     RegisterRequest,
+    ResendVerificationRequest,
     ResetPasswordRequest,
     TokenResponse,
+    VerifyEmailRequest,
 )
 from app.schemas.user import UserPublic
 from app.services import auth_service
@@ -53,9 +55,14 @@ def register(
 ) -> TokenResponse:
     """Cadastra um novo usuário e já retorna um JWT de acesso."""
     try:
-        auth_service.register_user(
+        user = auth_service.register_user(
             db, name=payload.name, email=payload.email, password=payload.password
         )
+        # Antes de autenticar: a conta já existe e o e-mail de confirmação sai
+        # de qualquer jeito, mesmo que o login logo abaixo seja recusado por
+        # REQUIRE_VERIFIED_EMAIL. Enviar depois deixaria o usuário sem link
+        # justamente no cenário em que ele mais precisa dele.
+        auth_service.send_verification_email(db, user=user)
         access_token = auth_service.authenticate_user(
             db, email=payload.email, password=payload.password
         )
@@ -157,6 +164,59 @@ def reset_password(
     except AuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
     return MessageResponse(message="Senha redefinida com sucesso.")
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+    dependencies=[Depends(stash_auth_identity)],
+)
+@limiter.limit(AUTH_RATE_LIMIT)
+def verify_email(
+    request: Request,
+    response: Response,
+    payload: VerifyEmailRequest,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """
+    Confirma o endereço a partir do token recebido por e-mail.
+
+    Sob rate limit porque o token é adivinhável por força bruta em tese — 256
+    bits tornam isso irrealista, mas o teto custa nada e fecha a porta.
+    """
+    if not auth_service.confirm_email_verification(db, token=payload.token):
+        raise HTTPException(400, "Link de confirmação inválido ou expirado.")
+    return MessageResponse(message="E-mail confirmado.")
+
+
+@router.post(
+    "/resend-verification",
+    response_model=MessageResponse,
+    dependencies=[Depends(stash_auth_identity)],
+)
+@limiter.limit(AUTH_RATE_LIMIT)
+def resend_verification(
+    request: Request,
+    response: Response,
+    payload: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """
+    Reenvia o e-mail de confirmação.
+
+    Resposta genérica sempre: exista ou não a conta, esteja ou não verificada, o
+    corpo é o mesmo. Variar aqui transformaria esta rota num verificador de
+    e-mails cadastrados — a mesma falha que `forgot-password` já evita.
+    """
+    user = auth_service.get_user_by_email(db, email=payload.email)
+    if user is not None:
+        auth_service.send_verification_email(db, user=user)
+    return MessageResponse(
+        message=(
+            "Se este e-mail estiver cadastrado e ainda não confirmado, "
+            "enviamos um novo link."
+        )
+    )
 
 
 @router.get("/me", response_model=UserPublic)

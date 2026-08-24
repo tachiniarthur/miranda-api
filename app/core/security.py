@@ -117,6 +117,20 @@ def hash_reset_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+# O token de verificação usa exatamente o mesmo tamanho e a mesma função de
+# hash do de reset. São o mesmo problema — segredo opaco de uso único cujo
+# valor em claro não pode ser persistido — e resolvê-los diferente só criaria
+# duas superfícies para auditar.
+def generate_verification_token() -> str:
+    """Gera um token de verificação de e-mail opaco e aleatório."""
+    return secrets.token_urlsafe(_RESET_TOKEN_BYTES)
+
+
+def hash_verification_token(token: str) -> str:
+    """SHA-256 hexadecimal do token de verificação — o que vai para o banco."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def decode_token(token: str, expected_type: str) -> str | None:
     """
     Decodifica e valida um JWT, garantindo o tipo esperado.

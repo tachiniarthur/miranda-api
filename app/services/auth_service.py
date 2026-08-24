@@ -7,7 +7,9 @@ sugerido; a camada de rotas converte isso em `HTTPException`.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
@@ -20,12 +22,19 @@ from app.core.security import (
     create_access_token,
     decode_token_payload,
     generate_reset_token,
+    generate_verification_token,
     hash_password,
     hash_reset_token,
+    hash_verification_token,
     verify_password,
 )
+from app.models.email_verification_token import EmailVerificationToken
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
+from app.services.email.messages import render_email_verification
+from app.services.email.sender import send_email
+
+logger = logging.getLogger("miranda.auth")
 
 
 class AuthError(Exception):
@@ -52,6 +61,89 @@ def get_user_by_email(db: Session, *, email: str) -> User | None:
     de recuperação existe para não vazar.
     """
     return _get_user_by_email(db, email)
+
+
+def issue_email_verification(db: Session, *, user: User) -> str | None:
+    """
+    Emite um token de verificação e revoga os pendentes do mesmo usuário.
+
+    Returns:
+        O token EM CLARO, para ir no e-mail. `None` se a conta já está
+        verificada — nesse caso não há nada a confirmar e emitir um token novo
+        só criaria um segredo válido sem propósito.
+    """
+    if user.is_email_verified:
+        return None
+
+    now = datetime.now(timezone.utc)
+
+    # Só o último pedido vale: um token novo invalida os anteriores, do mesmo
+    # jeito que no reset de senha — e pelo mesmo caminho (`update()` do Core,
+    # como em `_revoke_outstanding_reset_tokens`).
+    db.execute(
+        update(EmailVerificationToken)
+        .where(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+
+    raw = generate_verification_token()
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_verification_token(raw),
+            expires_at=now
+            + timedelta(hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS),
+        )
+    )
+    db.commit()
+    return raw
+
+
+def confirm_email_verification(db: Session, *, token: str) -> bool:
+    """
+    Consome um token e marca a conta como verificada.
+
+    Returns:
+        True se confirmou. False para token inexistente, já usado ou expirado —
+        os três casos devolvem a MESMA coisa de propósito: distinguir "expirado"
+        de "inválido" diria ao atacante que ele acertou um token que existiu.
+    """
+    row = db.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hash_verification_token(token)
+        )
+    )
+    now = datetime.now(timezone.utc)
+    if row is None or row.used_at is not None or row.expires_at <= now:
+        return False
+
+    row.used_at = now
+    user = db.get(User, row.user_id)
+    if user is None:
+        return False
+    user.email_verified_at = now
+    db.commit()
+    return True
+
+
+def send_verification_email(db: Session, *, user: User) -> None:
+    """
+    Emite o token e despacha o e-mail. Nunca lança.
+
+    Falha de entrega não pode derrubar o cadastro nem mudar a resposta HTTP: a
+    conta foi criada de qualquer jeito, e o usuário tem a rota de reenvio.
+    """
+    raw = issue_email_verification(db, user=user)
+    if raw is None:
+        return
+    url = f"{settings.APP_BASE_URL.rstrip('/')}/verificar-email?token={raw}"
+    try:
+        send_email(replace(render_email_verification(user.name, url), to=user.email))
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha inesperada ao enviar o e-mail de verificação.")
 
 
 def register_user(db: Session, *, name: str, email: str, password: str) -> User:
@@ -95,6 +187,14 @@ def authenticate_user(db: Session, *, email: str, password: str) -> str:
     # Mensagem genérica de propósito: não revela se o e-mail existe.
     if user is None or not senha_confere:
         raise AuthError(401, "E-mail ou senha inválidos.")
+
+    # A checagem vem DEPOIS de a senha conferir, de propósito. Se um e-mail não
+    # verificado respondesse 403 antes disso, bastaria tentar qualquer endereço
+    # com senha inventada para descobrir quais têm conta — exatamente a
+    # enumeração que o resto deste módulo trabalha para impedir.
+    if settings.REQUIRE_VERIFIED_EMAIL and not user.is_email_verified:
+        raise AuthError(403, "Confirme seu e-mail antes de entrar.")
+
     return create_access_token(str(user.id), token_version=user.token_version)
 
 
