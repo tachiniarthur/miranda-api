@@ -1,6 +1,8 @@
 """Modelo ORM da tabela `users`."""
 
-from sqlalchemy import Integer, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -26,6 +28,17 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Integer, nullable=False, server_default="0", default=0
     )
 
+    # Momento em que o dono do endereço confirmou que ele é dele. Nulo = não
+    # verificado.
+    #
+    # É um TIMESTAMP e não um booleano de propósito: "quando" responde perguntas
+    # que "se" não responde — há quanto tempo a conta está verificada, quantas
+    # verificaram depois de tal mudança. Um booleano jogaria fora essa
+    # informação para economizar 7 bytes.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     clothing_items: Mapped[list["ClothingItem"]] = relationship(  # noqa: F821
         back_populates="user",
         cascade="all, delete-orphan",
@@ -41,3 +54,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(  # noqa: F821
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @property
+    def is_email_verified(self) -> bool:
+        """Açúcar de leitura. A fonte da verdade é `email_verified_at`."""
+        return self.email_verified_at is not None
