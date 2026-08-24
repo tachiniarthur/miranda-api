@@ -93,14 +93,53 @@ def login(
     payload: LoginRequest,
     db: Session = Depends(get_db),
 ) -> TokenResponse:
-    """Autentica o usuário e retorna um JWT de acesso."""
+    """
+    Autentica o usuário, seta o cookie de sessão e retorna o JWT.
+
+    O corpo continua trazendo `access_token` porque clientes não-navegador
+    (scripts, um app nativo) não têm por que lidar com cookie — e o header
+    `Authorization` segue aceito nas rotas protegidas.
+    """
     try:
         access_token = auth_service.authenticate_user(
             db, email=payload.email, password=payload.password
         )
     except AuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    # httpOnly: o JavaScript não lê este valor, então um XSS não leva a sessão
+    # embora. SameSite=Lax é a contrapartida obrigatória — com cookie, o
+    # navegador manda a credencial sozinho, e sem isso qualquer site poderia
+    # disparar requisições autenticadas (CSRF).
+    response.set_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        value=access_token,
+        httponly=True,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        secure=settings.AUTH_COOKIE_SECURE,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
     return TokenResponse(access_token=access_token)
+
+
+@router.post("/logout", response_model=MessageResponse)
+def logout(response: Response) -> MessageResponse:
+    """
+    Encerra a sessão apagando o cookie.
+
+    Não invalida o JWT no servidor — ele continua válido até expirar. Para
+    matar todas as sessões de uma vez existe `users.token_version`, que a troca
+    de senha já incrementa.
+    """
+    response.delete_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        path="/",
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        secure=settings.AUTH_COOKIE_SECURE,
+        httponly=True,
+    )
+    return MessageResponse(message="Sessão encerrada.")
 
 
 @router.post(

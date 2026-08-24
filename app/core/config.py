@@ -200,6 +200,24 @@ class Settings(BaseSettings):
     # (ver `rate_limit.resolve_storage_uri`).
     RATE_LIMIT_STORAGE_URI: str = "redis://localhost:6379/0"
 
+    # ── Cookie de sessão ──────────────────────────────────────────────
+    # O JWT saiu do localStorage (alcançável por qualquer XSS) e passou a
+    # viajar num cookie httpOnly, que o JavaScript não lê.
+    #
+    # A contrapartida é CSRF: o navegador passa a mandar a credencial sozinho.
+    # SameSite=Lax é a defesa principal — o cookie não vai em requisição
+    # cross-site que não seja navegação de topo.
+    #
+    # `Strict` seria mais forte e QUEBRARIA a volta do link de verificação de
+    # e-mail, que é exatamente uma navegação de topo vinda de outro contexto.
+    AUTH_COOKIE_NAME: str = "miranda_session"
+    AUTH_COOKIE_SAMESITE: str = "lax"
+    # `Secure` faz o navegador só enviar o cookie por HTTPS. DESLIGADO por
+    # padrão porque em desenvolvimento a API roda em http://localhost e o
+    # navegador descartaria o cookie. LIGUE EM PRODUÇÃO — ver checklist de
+    # deploy no README.
+    AUTH_COOKIE_SECURE: bool = False
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")
