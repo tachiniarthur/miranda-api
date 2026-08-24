@@ -41,6 +41,19 @@ def _get_user_by_email(db: Session, email: str) -> User | None:
     return db.scalar(select(User).where(User.email == email.lower()))
 
 
+def get_user_by_email(db: Session, *, email: str) -> User | None:
+    """
+    Versão pública de `_get_user_by_email`, para quem precisa do usuário sem
+    passar por autenticação — hoje, a rota de recuperação de senha, que monta o
+    e-mail com o nome de quem vai recebê-lo.
+
+    ⚠️ Quem chamar isto NÃO pode deixar o resultado influenciar a resposta HTTP:
+    a diferença entre `None` e um usuário é exatamente a informação que o fluxo
+    de recuperação existe para não vazar.
+    """
+    return _get_user_by_email(db, email)
+
+
 def register_user(db: Session, *, name: str, email: str, password: str) -> User:
     """Cria um novo usuário, rejeitando e-mail duplicado."""
     email = email.lower()

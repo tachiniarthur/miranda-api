@@ -8,11 +8,13 @@
 # o corpo das requisições. Com anotações reais o problema não existe.
 
 import logging
+from dataclasses import replace
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import AUTH_RATE_LIMIT, limiter, stash_auth_identity
 from app.models.user import User
@@ -28,6 +30,8 @@ from app.schemas.auth import (
 from app.schemas.user import UserPublic
 from app.services import auth_service
 from app.services.auth_service import AuthError
+from app.services.email.messages import render_password_reset
+from app.services.email.sender import send_email
 
 logger = logging.getLogger("miranda.auth")
 
@@ -97,28 +101,34 @@ def forgot_password(
     """
     Inicia o fluxo de recuperação de senha.
 
-    Gera um token de redefinição de uso único associado ao usuário. Responde
-    sempre de forma genérica — mesma mensagem, mesmos campos, exista ou não o
-    e-mail — para não revelar quais e-mails estão cadastrados.
+    Gera um token de redefinição de uso único e o envia POR E-MAIL ao dono do
+    endereço. Responde sempre de forma genérica — mesma mensagem, mesmos campos,
+    exista ou não o e-mail — para não revelar quais endereços estão cadastrados.
 
-    O token NUNCA vai na resposta HTTP: quem faz o pedido não é necessariamente
-    o dono do e-mail, e devolvê-lo entregaria a conta a qualquer um que
-    soubesse o endereço.
+    O token nunca vai na resposta HTTP nem no log: quem faz o pedido não é
+    necessariamente o dono do e-mail, e qualquer um desses dois canais entregaria
+    a conta a quem soubesse o endereço.
 
-    TODO (antes de expor à internet): ainda não há servidor de e-mail, então o
-    token é registrado no log do servidor em nível WARNING, para permitir testar
-    o fluxo localmente. Isso deixa um segredo em texto puro nos logs — aceitável
-    só enquanto a API roda na máquina do desenvolvedor. Substituir por envio de
-    e-mail e remover o log antes de qualquer ambiente exposto.
+    Falha de entrega NÃO muda a resposta. Um servidor de e-mail fora do ar não
+    pode virar um oráculo de "esta conta existe" — nem por status, nem por corpo.
     """
     reset_token = auth_service.create_reset_token_for_email(db, email=payload.email)
     if reset_token is not None:
-        logger.warning(
-            "[DEV] Token de redefinição gerado para %s: %s "
-            "(substituir por envio de e-mail antes de publicar)",
-            payload.email,
-            reset_token,
+        user = auth_service.get_user_by_email(db, email=payload.email)
+        reset_url = (
+            f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={reset_token}"
         )
+        message = replace(
+            render_password_reset(user.name if user else "", reset_url),
+            to=payload.email,
+        )
+        try:
+            send_email(message)
+        except Exception:  # noqa: BLE001
+            # `send_email` já promete não lançar; este except é a rede contra um
+            # backend futuro que quebre a promessa. A resposta não pode mudar.
+            logger.exception("Falha inesperada ao enviar o e-mail de redefinição.")
+
     return ForgotPasswordResponse(
         message=(
             "Se este e-mail estiver cadastrado, enviamos instruções para "
