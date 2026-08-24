@@ -51,4 +51,10 @@ def get_current_user(
             detail="Sessão inválida ou expirada. Faça login novamente.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # A key_func do slowapi é síncrona e só recebe o Request, então não tem como
+    # resolver o usuário sozinha. Deixamos o id aqui para que o rate limit das
+    # rotas autenticadas possa ser por conta, e não por IP (ver
+    # `rate_limit.user_or_ip_key`).
+    request.state.current_user_id = str(user.id)
     return user

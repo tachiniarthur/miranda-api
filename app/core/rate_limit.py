@@ -59,6 +59,23 @@ def auth_rate_limit_key(request: Request) -> str:
     return f"{ip}|{email}"
 
 
+def user_or_ip_key(request: Request) -> str:
+    """
+    Chave de cota para rotas autenticadas: o usuário, com queda para o IP.
+
+    Diferente das rotas de auth, aqui existe usuário logado — e é ele o eixo
+    certo. Limitar por IP puniria uma casa inteira atrás do mesmo NAT por causa
+    de uma pessoa, e um atacante com uma conta trocaria de IP para contornar.
+
+    A queda para IP cobre o caso em que a dependency de autenticação ainda não
+    rodou quando a key_func é chamada.
+    """
+    user_id = getattr(request.state, "current_user_id", None)
+    if user_id:
+        return f"user:{user_id}"
+    return f"ip:{get_remote_address(request)}"
+
+
 async def stash_auth_identity(request: Request) -> None:
     """
     Dependency que extrai o e-mail do corpo e o guarda em `request.state`.

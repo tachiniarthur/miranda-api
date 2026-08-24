@@ -225,6 +225,16 @@ class Settings(BaseSettings):
     # cada peça ainda pode custar uma passada de CPU pelo FashionCLIP.
     MAX_ITEMS_PER_USER: int = 150
 
+    # Tetos das rotas caras de guarda-roupa, por USUÁRIO autenticado (ver
+    # `rate_limit.user_or_ip_key`).
+    #
+    # Upload grava arquivo no disco; /analyze roda o FashionCLIP em CPU e é o
+    # gasto mais caro do projeto — por isso o teto menor. Os dois números são
+    # generosos para uma pessoa (60 peças cadastradas numa hora é muito mais do
+    # que qualquer um faz) e apertados para um script.
+    WARDROBE_UPLOAD_RATE_LIMIT: str = "60/hour"
+    ANALYZE_RATE_LIMIT: str = "40/hour"
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")
