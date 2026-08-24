@@ -35,7 +35,7 @@ from app.services.storage import (
     authenticated_image_url,
     image_storage,
 )
-from app.services.wardrobe_service import WardrobeError
+from app.services.wardrobe_service import QuotaExceededError, WardrobeError
 
 router = APIRouter(prefix="/wardrobe/items", tags=["wardrobe"])
 
@@ -177,6 +177,11 @@ async def create_item(
             image=image,
             storage=image_storage,
         )
+    except QuotaExceededError as exc:
+        # 409 e não 403: não é falta de permissão, é conflito com o estado atual
+        # da conta — e o caminho para resolver é apagar uma peça, não pedir
+        # acesso.
+        raise HTTPException(status_code=409, detail=str(exc))
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _to_public(item)

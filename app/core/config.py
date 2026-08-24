@@ -218,6 +218,13 @@ class Settings(BaseSettings):
     # deploy no README.
     AUTH_COOKIE_SECURE: bool = False
 
+    # ── Quota de guarda-roupa ─────────────────────────────────────────
+    # Teto de peças por usuário. Generoso para um guarda-roupa real (150 peças
+    # cadastradas com foto é muito mais do que a maioria das pessoas tem) e
+    # finito para um script: sem teto, uma conta enche o disco e a tabela, e
+    # cada peça ainda pode custar uma passada de CPU pelo FashionCLIP.
+    MAX_ITEMS_PER_USER: int = 150
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")

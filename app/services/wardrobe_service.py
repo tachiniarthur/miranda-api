@@ -7,9 +7,10 @@ from __future__ import annotations
 import uuid
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.clothing_item import ClothingItem
 from app.models.enums import ClothingCategory
 from app.schemas.clothing_item import ClothingItemCreate, ClothingItemUpdate
@@ -23,6 +24,29 @@ class WardrobeError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+class QuotaExceededError(Exception):
+    """O usuário atingiu o teto de peças cadastradas."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"Limite de {limit} peças por conta atingido.")
+        self.limit = limit
+
+
+def _assert_within_quota(db: Session, *, user_id: uuid.UUID) -> None:
+    """
+    Confere a quota ANTES de gravar a imagem no disco.
+
+    A ordem importa: validar depois do upload deixaria um arquivo órfão no
+    storage a cada tentativa recusada — que é exatamente o recurso que a quota
+    existe para proteger.
+    """
+    atuais = db.scalar(
+        select(func.count(ClothingItem.id)).where(ClothingItem.user_id == user_id)
+    )
+    if (atuais or 0) >= settings.MAX_ITEMS_PER_USER:
+        raise QuotaExceededError(settings.MAX_ITEMS_PER_USER)
 
 
 def list_items(
@@ -53,6 +77,8 @@ async def create_item(
     image: UploadFile,
     storage: ImageStorage,
 ) -> ClothingItem:
+    _assert_within_quota(db, user_id=user_id)
+
     image_path = await storage.save(image)
 
     item = ClothingItem(
