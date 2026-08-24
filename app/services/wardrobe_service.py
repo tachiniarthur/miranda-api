@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.clothing_item import ClothingItem
 from app.models.enums import ClothingCategory
+from app.models.user import User
 from app.schemas.clothing_item import ClothingItemCreate, ClothingItemUpdate
 from app.services.storage import ImageStorage
 
@@ -42,6 +43,16 @@ def _assert_within_quota(db: Session, *, user_id: uuid.UUID) -> None:
     storage a cada tentativa recusada — que é exatamente o recurso que a quota
     existe para proteger.
     """
+    # `with_for_update()` trava a linha do usuário até o fim desta transação.
+    #
+    # Sem a trava, contar e gravar são dois passos com uma janela no meio: dois
+    # uploads simultâneos leem a MESMA contagem antes de qualquer um inserir, os
+    # dois passam pela checagem, e com N requisições em paralelo o teto vira
+    # teto + N. É a mesma corrida que `auth_service.reset_password` já fecha do
+    # mesmo jeito — e aqui ela é barata, porque a trava é por usuário e só
+    # serializa os uploads simultâneos da própria conta.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update())
+
     atuais = db.scalar(
         select(func.count(ClothingItem.id)).where(ClothingItem.user_id == user_id)
     )

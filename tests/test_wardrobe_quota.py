@@ -157,3 +157,47 @@ def test_o_padrao_e_generoso_mas_finito():
         _env_file=None,
     )
     assert s.MAX_ITEMS_PER_USER == 150
+
+
+def test_uploads_simultaneos_nao_furam_a_quota(db, dono, monkeypatch):
+    """
+    Contar e gravar são dois passos. Sem trava, pedidos simultâneos leem a MESMA
+    contagem antes de qualquer um inserir e todos passam — com N em paralelo, o
+    teto vira teto + N.
+
+    O teste exercita a parte de banco de `create_item` (checagem + insert na
+    mesma transação) a partir de várias threads, cada uma com sua sessão. Com a
+    trava, exatamente uma passa.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services import wardrobe_service
+
+    monkeypatch.setattr(settings, "MAX_ITEMS_PER_USER", 1)
+    user_id = dono.id
+
+    def _tenta() -> bool:
+        sessao = SessionLocal()
+        try:
+            wardrobe_service._assert_within_quota(sessao, user_id=user_id)
+            sessao.add(
+                ClothingItem(
+                    user_id=user_id,
+                    name="simultânea",
+                    category=ClothingCategory.CAMISA,
+                    image_path=f"corrida_{uuid.uuid4().hex}.png",
+                )
+            )
+            sessao.commit()
+            return True
+        except wardrobe_service.QuotaExceededError:
+            sessao.rollback()
+            return False
+        finally:
+            sessao.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resultados = list(pool.map(lambda _: _tenta(), range(8)))
+
+    assert sum(resultados) == 1, f"a quota deixou passar {sum(resultados)} de 8"
+    assert db.query(ClothingItem).filter(ClothingItem.user_id == user_id).count() == 1
