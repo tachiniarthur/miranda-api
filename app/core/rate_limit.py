@@ -24,11 +24,17 @@ de palpites de token que uma origem consegue dar.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+
+from app.core.config import settings
+
+logger = logging.getLogger("miranda.rate_limit")
 
 # 5 tentativas a cada 15 minutos, por par (IP, e-mail).
 AUTH_RATE_LIMIT = "5/15 minutes"
@@ -75,6 +81,35 @@ async def stash_auth_identity(request: Request) -> None:
             setattr(request.state, _EMAIL_STATE_ATTR, email.strip().lower())
 
 
+def resolve_storage_uri(uri: str | None = None) -> str:
+    """
+    Devolve a URI de storage a usar, confirmando que o Redis responde.
+
+    A confirmação acontece UMA vez, no import. Sem ela, um Redis fora do ar só
+    apareceria na primeira requisição de auth — como erro, não como aviso — e o
+    modo de falha seria HTTP 500 numa rota de login em vez de um limite mais
+    frouxo.
+    """
+    uri = uri if uri is not None else settings.RATE_LIMIT_STORAGE_URI
+    if not uri.startswith("redis://") and not uri.startswith("rediss://"):
+        return uri
+
+    try:
+        import redis
+
+        redis.Redis.from_url(uri, socket_connect_timeout=1).ping()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Redis inacessível em %s (%s). O rate limit cai para memory:// — "
+            "correto com UM worker apenas. Suba o Redis com "
+            "`docker compose up -d`.",
+            uri,
+            exc,
+        )
+        return "memory://"
+    return uri
+
+
 limiter = Limiter(
     key_func=auth_rate_limit_key,
     # `moving-window` conta as tentativas dos últimos 15 minutos corridos. A
@@ -83,10 +118,10 @@ limiter = Limiter(
     strategy="moving-window",
     # Emite Retry-After e X-RateLimit-* para o cliente saber quando reter.
     headers_enabled=True,
-    # Armazenamento em memória do processo. Suficiente para um único worker;
-    # ao escalar para vários processos (ou várias máquinas), trocar por
-    # storage_uri="redis://..." — senão cada worker terá sua própria cota.
-    storage_uri="memory://",
+    # Contadores fora do processo (Redis por padrão), para que a cota seja a
+    # mesma para todos os workers. Redis fora do ar degrada para memória com
+    # aviso — ver `resolve_storage_uri`.
+    storage_uri=resolve_storage_uri(),
 )
 
 

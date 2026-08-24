@@ -191,6 +191,15 @@ class Settings(BaseSettings):
 
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
 
+    # ── Rate limiting ─────────────────────────────────────────────────
+    # Onde o slowapi guarda os contadores. `memory://` só é correto com UM
+    # worker: com vários, cada processo tem a própria cota e o teto configurado
+    # vale N vezes mais do que aparenta.
+    #
+    # Redis indisponível NÃO derruba a API — cai para memória com aviso no log
+    # (ver `rate_limit.resolve_storage_uri`).
+    RATE_LIMIT_STORAGE_URI: str = "redis://localhost:6379/0"
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")
