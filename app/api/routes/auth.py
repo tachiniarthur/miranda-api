@@ -42,7 +42,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post(
     "/register",
-    response_model=TokenResponse,
+    response_model=MessageResponse,
     status_code=201,
     dependencies=[Depends(stash_auth_identity)],
 )
@@ -52,23 +52,33 @@ def register(
     response: Response,
     payload: RegisterRequest,
     db: Session = Depends(get_db),
-) -> TokenResponse:
-    """Cadastra um novo usuário e já retorna um JWT de acesso."""
-    try:
-        user = auth_service.register_user(
-            db, name=payload.name, email=payload.email, password=payload.password
-        )
-        # Antes de autenticar: a conta já existe e o e-mail de confirmação sai
-        # de qualquer jeito, mesmo que o login logo abaixo seja recusado por
-        # REQUIRE_VERIFIED_EMAIL. Enviar depois deixaria o usuário sem link
-        # justamente no cenário em que ele mais precisa dele.
+) -> MessageResponse:
+    """
+    Recebe um cadastro.
+
+    Responde SEMPRE a mesma coisa, exista ou não o e-mail. Quando já existe,
+    nada é criado e quem recebe o aviso é o dono do endereço — o único canal que
+    só ele lê. O custo é de experiência: quem esqueceu que já tinha conta não vê
+    mais o erro na tela. É o preço de fechar a enumeração (item #4).
+
+    A conta também não sai daqui autenticada: entrar exige passar pelo login,
+    que é onde a senha é conferida.
+    """
+    user = auth_service.register_or_notify(
+        db, name=payload.name, email=payload.email, password=payload.password
+    )
+    if user is not None:
         auth_service.send_verification_email(db, user=user)
-        access_token = auth_service.authenticate_user(
-            db, email=payload.email, password=payload.password
+
+    # Mesma resposta nos dois casos. Não devolvemos o usuário criado: o corpo
+    # precisa ser idêntico exista ou não a conta, e um objeto de usuário só
+    # existiria em um dos caminhos.
+    return MessageResponse(
+        message=(
+            "Cadastro recebido. Se este e-mail ainda não tiver conta, "
+            "enviamos um link de confirmação."
         )
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
-    return TokenResponse(access_token=access_token)
+    )
 
 
 @router.post(

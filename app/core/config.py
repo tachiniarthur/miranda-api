@@ -184,10 +184,9 @@ class Settings(BaseSettings):
     # Ligue quando houver entrega de e-mail confiável (EMAIL_BACKEND=resend com
     # domínio verificado) e depois de verificar as contas que já existem.
     #
-    # ⚠️ Com a flag LIGADA, `POST /api/auth/register` responde 403 em vez de
-    # devolver token: a conta é criada e o e-mail sai, mas o login embutido no
-    # cadastro esbarra na mesma trava. O frontend precisa tratar esse 403 como
-    # "confirme seu e-mail" antes de a flag ser ligada em produção.
+    # Com a flag ligada, só o LOGIN é recusado (403). O cadastro não autentica
+    # ninguém, então segue respondendo igual — e o usuário tem o link no e-mail
+    # e a rota de reenvio para sair desse estado.
     REQUIRE_VERIFIED_EMAIL: bool = False
 
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24

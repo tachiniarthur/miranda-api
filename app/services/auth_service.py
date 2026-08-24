@@ -31,7 +31,10 @@ from app.core.security import (
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
-from app.services.email.messages import render_email_verification
+from app.services.email.messages import (
+    render_duplicate_signup_notice,
+    render_email_verification,
+)
 from app.services.email.sender import send_email
 
 logger = logging.getLogger("miranda.auth")
@@ -146,17 +149,43 @@ def send_verification_email(db: Session, *, user: User) -> None:
         logger.exception("Falha inesperada ao enviar o e-mail de verificação.")
 
 
-def register_user(db: Session, *, name: str, email: str, password: str) -> User:
-    """Cria um novo usuário, rejeitando e-mail duplicado."""
-    email = email.lower()
-    if _get_user_by_email(db, email) is not None:
-        raise AuthError(409, "Este e-mail já está cadastrado.")
+def register_or_notify(
+    db: Session, *, name: str, email: str, password: str
+) -> User | None:
+    """
+    Cria a conta OU, se o e-mail já existir, avisa o dono e não cria nada.
 
-    user = User(
-        name=name.strip(),
-        email=email,
-        hashed_password=hash_password(password),
-    )
+    Returns:
+        O usuário criado, ou `None` quando o e-mail já estava cadastrado.
+
+    ⚠️ Quem chama NÃO pode deixar esse `None` mudar a resposta HTTP. Ele existe
+    para a rota saber se deve disparar o e-mail de verificação, não para virar
+    um código de status diferente — a diferença entre os dois casos é
+    exatamente o que o item #4 da revisão de segurança manda esconder.
+
+    O `hash_password` roda nos DOIS caminhos, mesmo quando o hash é jogado fora.
+    Sem isso, o caminho do e-mail repetido responderia sem pagar os ~250 ms do
+    bcrypt, e o relógio entregaria quais endereços têm conta — a mesma falha que
+    `authenticate_user` corrige com o `DUMMY_PASSWORD_HASH`.
+    """
+    email = email.lower()
+    hashed = hash_password(password)
+
+    existente = _get_user_by_email(db, email)
+    if existente is not None:
+        try:
+            send_email(
+                replace(
+                    render_duplicate_signup_notice(existente.name), to=existente.email
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Falha ao avisar o dono da conta sobre cadastro repetido."
+            )
+        return None
+
+    user = User(name=name.strip(), email=email, hashed_password=hashed)
     db.add(user)
     db.commit()
     db.refresh(user)
