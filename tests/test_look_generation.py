@@ -485,3 +485,97 @@ def test_a_non_serializable_piece_degrades_instead_of_raising(monkeypatch):
     assert calls == []
     assert result["looks"] == []
     assert result["unavailable"] is True
+
+
+# ── Categoria errada vinda da análise (limitação conhecida) ─────────────────
+# A composição confia na `category` gravada na peça. Se a análise rotulou um
+# vestido como `saia`, ele é uma peça de baixo daqui para a frente — e o
+# resultado parece um erro de composição, mas nasce na categorização.
+#
+# Estes testes fixam o COMPORTAMENTO nesse caso: previsível e estruturalmente
+# válido, ainda que baseado num dado errado.
+def test_vestido_rotulado_como_saia_vira_peca_de_baixo(monkeypatch):
+    """
+    O vestido rotulado como saia vira peça de baixo e aceita peça de cima.
+    Isso NÃO é um bug da composição: é o dado que chegou errado. O que a
+    composição garante é não produzir uma estrutura inválida por causa disso.
+    """
+    guarda_roupa = [
+        piece("d_errado", "saia", peso="leve"),  # é um vestido, veio como saia
+        piece("t1", "camisa", peso="leve"),
+        piece("f1", "calcado", peso="leve"),
+    ]
+    _stub_api(
+        monkeypatch,
+        [
+            reply(
+                [
+                    {
+                        "label": "I",
+                        "items": [
+                            {"item_id": "d_errado", "role": "peça de baixo"},
+                            {"item_id": "t1", "role": "peça de cima"},
+                            {"item_id": "f1", "role": "calçado"},
+                        ],
+                        "commentary": "Uma frase qualquer.",
+                    }
+                ]
+            )
+        ],
+    )
+
+    result = generate_daily_look(guarda_roupa, MILD_DAY, ocasiao="dia_a_dia")
+    assert result["unavailable"] is False
+    assert len(result["looks"]) == 1
+    papeis = {i["role"] for i in result["looks"][0]["items"]}
+    assert "peça de baixo" in papeis and "peça de cima" in papeis
+
+
+def test_a_guarda_estrutural_vale_mesmo_com_categoria_errada(monkeypatch):
+    """
+    A rede de segurança continua valendo: com a categoria errada, o modelo NÃO
+    consegue produzir vestido + peça de baixo, porque a peça deixou de contar
+    como vestido. A estrutura sai válida mesmo com o dado errado.
+    """
+    guarda_roupa = [
+        piece("d_errado", "saia", peso="leve"),
+        piece("b1", "calca", peso="leve"),
+        piece("t1", "camisa", peso="leve"),
+    ]
+    # Duas peças de baixo: tem de ser descartado.
+    _stub_api(
+        monkeypatch,
+        [
+            reply(
+                [
+                    {
+                        "label": "I",
+                        "items": [
+                            {"item_id": "d_errado", "role": "peça de baixo"},
+                            {"item_id": "b1", "role": "peça de baixo"},
+                            {"item_id": "t1", "role": "peça de cima"},
+                        ],
+                        "commentary": "x",
+                    }
+                ]
+            )
+        ],
+    )
+
+    result = generate_daily_look(guarda_roupa, MILD_DAY, ocasiao="dia_a_dia")
+    assert result["looks"] == []
+    assert result["unavailable"] is True
+
+
+def test_a_limitacao_conhecida_esta_documentada_no_modulo():
+    """
+    Trava de documentação. Esta limitação já foi apagada uma vez, na reescrita
+    que trocou o motor de regras pela API (commit 3cc04c4), junto com o teste
+    que a cobria. Este teste existe para que a próxima reescrita não a apague
+    em silêncio de novo.
+    """
+    import app.services.ai.look_generation as lg
+
+    doc = lg.__doc__ or ""
+    assert "LIMITAÇÃO CONHECIDA" in doc
+    assert "categoria" in doc.lower()
