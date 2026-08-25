@@ -54,5 +54,13 @@ class ResetPasswordRequest(BaseModel):
     _no_common_password = field_validator("new_password")(_reject_common_password)
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 class MessageResponse(BaseModel):
     message: str

@@ -211,3 +211,144 @@ def test_trocar_a_senha_revoga_os_demais_tokens_pendentes(db, user):
     with pytest.raises(AuthError):
         auth_service.reset_password(db, token=paralelo, new_password="terceira-999")
     assert all(t.used_at is not None for t in _tokens_do(db, user))
+
+
+# ── Entrega do token por e-mail (substitui o log em texto puro) ─────────────
+# O token deixou de ir para o log do servidor. Estes testes protegem as duas
+# metades disso: que ele agora vai por e-mail, e que ele NÃO vai mais para
+# lugar nenhum que não seja a caixa do dono do endereço.
+#
+# O envio é interceptado em `app.api.routes.auth.send_email` — o nome que a
+# ROTA enxerga — e não no módulo de origem: a rota importa a função por valor,
+# então trocar o atributo em `app.services.email.sender` não a alcançaria.
+
+
+@pytest.fixture
+def usuario_web(db):
+    """
+    Um usuário com e-mail que passa pela validação da BORDA HTTP.
+
+    O fixture `user` usa o TLD `.test` (reservado para testes, o certo para
+    quem fala direto com o serviço), mas o `EmailStr` do pydantic recusa
+    domínios de uso especial — e estes testes entram pela rota, não pelo
+    serviço. Daí um segundo fixture, em vez de afrouxar o primeiro.
+    """
+    u = User(
+        name="Usuária de Teste",
+        email=f"teste-reset-{uuid.uuid4().hex}@exemplo.com",
+        hashed_password=hash_password(SENHA_ORIGINAL),
+    )
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    try:
+        yield u
+    finally:
+        db.delete(u)
+        db.commit()
+
+
+@pytest.fixture
+def client(db):
+    """
+    Cliente HTTP ligado ao MESMO banco do fixture `db`, para que o usuário
+    criado pelo fixture `user` exista para a rota.
+
+    `limiter.reset()` nas duas pontas zera a janela do rate limit de auth: sem
+    isso, um teste que faz vários pedidos contaminaria os seguintes.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.core.database import get_db
+    from app.core.rate_limit import limiter
+    from app.main import app
+
+    def _sessao_do_teste():
+        yield db
+
+    app.dependency_overrides[get_db] = _sessao_do_teste
+    limiter.reset()
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+        limiter.reset()
+
+
+def test_o_token_vai_por_email_e_nao_para_o_log(
+    client, usuario_web, caplog, monkeypatch
+):
+    import logging
+    import re
+
+    from app.api.routes import auth as rota_auth
+
+    enviados = []
+    monkeypatch.setattr(rota_auth, "send_email", lambda m: enviados.append(m) or True)
+
+    with caplog.at_level(logging.DEBUG):
+        resp = client.post(
+            "/api/auth/forgot-password", json={"email": usuario_web.email}
+        )
+
+    assert resp.status_code == 200
+    assert len(enviados) == 1, "um e-mail devia ter sido enviado"
+    assert enviados[0].to == usuario_web.email
+
+    # O token está no corpo do e-mail...
+    achado = re.search(r"token=([A-Za-z0-9_\-]{20,})", enviados[0].text)
+    assert achado, "o e-mail precisa carregar o link com o token"
+
+    # ...e NÃO está em lugar nenhum do log.
+    assert achado.group(1) not in caplog.text
+
+
+def test_email_desconhecido_nao_dispara_envio(client, monkeypatch):
+    from app.api.routes import auth as rota_auth
+
+    enviados = []
+    monkeypatch.setattr(rota_auth, "send_email", lambda m: enviados.append(m) or True)
+
+    resp = client.post(
+        "/api/auth/forgot-password", json={"email": "ninguem-aqui@exemplo.com"}
+    )
+
+    assert resp.status_code == 200
+    assert enviados == [], "não existe conta: não há para quem enviar"
+
+
+def test_a_resposta_e_identica_exista_ou_nao_o_email(client, usuario_web, monkeypatch):
+    """
+    A resposta não pode variar com a existência da conta NEM com o sucesso do
+    envio — as duas coisas seriam canais de enumeração.
+    """
+    from app.api.routes import auth as rota_auth
+
+    # Simula servidor de e-mail fora do ar.
+    monkeypatch.setattr(rota_auth, "send_email", lambda m: False)
+
+    existe = client.post(
+        "/api/auth/forgot-password", json={"email": usuario_web.email}
+    )
+    nao_existe = client.post(
+        "/api/auth/forgot-password", json={"email": "ninguem@exemplo.com"}
+    )
+
+    assert existe.status_code == nao_existe.status_code == 200
+    assert existe.json() == nao_existe.json()
+
+
+def test_falha_de_entrega_nao_quebra_o_pedido(client, usuario_web, monkeypatch):
+    """Servidor de e-mail fora do ar continua devolvendo 200, não 500."""
+    from app.api.routes import auth as rota_auth
+
+    def _explode(m):
+        raise RuntimeError("smtp morreu de um jeito imprevisto")
+
+    monkeypatch.setattr(rota_auth, "send_email", _explode)
+
+    resp = client.post(
+        "/api/auth/forgot-password", json={"email": usuario_web.email}
+    )
+
+    assert resp.status_code == 200

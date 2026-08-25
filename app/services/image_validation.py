@@ -152,3 +152,67 @@ async def read_and_validate_upload(file: UploadFile) -> tuple[bytes, str]:
     contents = await file.read()
     ext = validate_image_bytes(content_type=file.content_type, contents=contents)
     return contents, ext
+
+
+def perceptual_hash(contents: bytes) -> str | None:
+    """
+    dHash de 64 bits da imagem, em hexadecimal (16 caracteres).
+
+    ── Por que perceptual e não SHA-256 ────────────────────────────────────
+    Um hash criptográfico muda inteiro se um único byte mudar, então
+    recomprimir o JPEG, redimensionar ou só salvar de novo já burlaria a
+    checagem de reenvio — e essas são exatamente as transformações que um
+    script usaria para encher a quota de graça.
+
+    ── O que ele NÃO promete ───────────────────────────────────────────────
+    Recompressão AGRESSIVA (JPEG abaixo de ~90 de qualidade) chega a virar um
+    ou dois bits em regiões chapadas, onde vizinhos quase idênticos fazem a
+    comparação depender de ruído. Aí o reenvio passa. A comparação continua
+    sendo por igualdade exata mesmo assim, de propósito: aceitar "quase igual"
+    pegaria peças legítimas parecidas, e recusar uma peça de verdade é pior do
+    que deixar passar um reenvio. Erra-se para o lado seguro.
+
+    ── Como funciona ───────────────────────────────────────────────────────
+    Reduz para 9x8 em tons de cinza e compara cada pixel com o vizinho da
+    direita: 8 comparações por linha, 8 linhas, 64 bits. O resultado depende da
+    ESTRUTURA da imagem (onde ela fica mais clara e mais escura), não dos bytes
+    — por isso sobrevive à recompressão.
+
+    Implementado à mão de propósito: a biblioteca `imagehash` traria `scipy`
+    junto, o que é desproporcional para quinze linhas.
+
+    Returns:
+        O hash, ou `None` se os bytes não abrirem como imagem OU se a imagem for
+        estruturalmente degenerada (ver abaixo). Não lança: a validação de
+        imagem já roda antes, e um erro aqui não pode derrubar um upload que ela
+        aprovou.
+    """
+    # Import tardio pelo mesmo motivo do resto do módulo: o Pillow é pesado e
+    # não precisa entrar no import da aplicação.
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(contents)) as img:
+            reduzida = img.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+            # `tobytes()` em vez de `getdata()`: em modo "L" são exatamente os
+            # 72 valores de 0 a 255, e o outro está a caminho da remoção.
+            pixels = reduzida.tobytes()
+    except Exception:  # noqa: BLE001
+        return None
+
+    bits = 0
+    for linha in range(8):
+        base = linha * 9
+        for coluna in range(8):
+            bits <<= 1
+            if pixels[base + coluna] > pixels[base + coluna + 1]:
+                bits |= 1
+
+    # Imagem sem estrutura (fundo chapado, silhueta muito uniforme) produz 64
+    # bits todos iguais — e DUAS peças diferentes assim colidiriam, fazendo a
+    # checagem recusar um cadastro legítimo. Um hash degenerado vale menos que
+    # nenhum: devolvemos None e a peça simplesmente não participa da checagem.
+    if bits in (0, (1 << 64) - 1):
+        return None
+
+    return f"{bits:016x}"

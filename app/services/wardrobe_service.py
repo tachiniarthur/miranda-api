@@ -7,13 +7,20 @@ from __future__ import annotations
 import uuid
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.clothing_item import ClothingItem
 from app.models.enums import ClothingCategory
+from app.models.user import User
 from app.schemas.clothing_item import ClothingItemCreate, ClothingItemUpdate
-from app.services.storage import ImageStorage
+from app.services.image_validation import (
+    ImageValidationError,
+    perceptual_hash,
+    read_and_validate_upload,
+)
+from app.services.storage import ImageStorage, StorageError
 
 
 class WardrobeError(Exception):
@@ -23,6 +30,49 @@ class WardrobeError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+class DuplicateImageError(Exception):
+    """Esta imagem já está cadastrada nesta conta."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Esta imagem já está cadastrada no seu guarda-roupa. "
+            "Use outra foto ou edite a peça existente."
+        )
+
+
+class QuotaExceededError(Exception):
+    """O usuário atingiu o teto de peças cadastradas."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"Limite de {limit} peças por conta atingido.")
+        self.limit = limit
+
+
+def _assert_within_quota(db: Session, *, user_id: uuid.UUID) -> None:
+    """
+    Confere a quota ANTES de gravar a imagem no disco.
+
+    A ordem importa: validar depois do upload deixaria um arquivo órfão no
+    storage a cada tentativa recusada — que é exatamente o recurso que a quota
+    existe para proteger.
+    """
+    # `with_for_update()` trava a linha do usuário até o fim desta transação.
+    #
+    # Sem a trava, contar e gravar são dois passos com uma janela no meio: dois
+    # uploads simultâneos leem a MESMA contagem antes de qualquer um inserir, os
+    # dois passam pela checagem, e com N requisições em paralelo o teto vira
+    # teto + N. É a mesma corrida que `auth_service.reset_password` já fecha do
+    # mesmo jeito — e aqui ela é barata, porque a trava é por usuário e só
+    # serializa os uploads simultâneos da própria conta.
+    db.execute(select(User.id).where(User.id == user_id).with_for_update())
+
+    atuais = db.scalar(
+        select(func.count(ClothingItem.id)).where(ClothingItem.user_id == user_id)
+    )
+    if (atuais or 0) >= settings.MAX_ITEMS_PER_USER:
+        raise QuotaExceededError(settings.MAX_ITEMS_PER_USER)
 
 
 def list_items(
@@ -53,11 +103,37 @@ async def create_item(
     image: UploadFile,
     storage: ImageStorage,
 ) -> ClothingItem:
+    _assert_within_quota(db, user_id=user_id)
+
+    # Lê e valida ANTES de gravar: a checagem de duplicata precisa dos bytes, e
+    # recusar depois deixaria o arquivo órfão no disco — justamente o recurso
+    # que estas duas defesas existem para proteger.
+    try:
+        contents, _ext = await read_and_validate_upload(image)
+    except ImageValidationError as exc:
+        # Mesma tradução que `LocalImageStorage.save` faz: quem chama `create_item`
+        # trata StorageError.
+        raise StorageError(exc.message) from exc
+
+    image_hash = perceptual_hash(contents)
+    if image_hash is not None:
+        ja_existe = db.scalar(
+            select(ClothingItem.id).where(
+                ClothingItem.user_id == user_id,
+                ClothingItem.image_hash == image_hash,
+            )
+        )
+        if ja_existe is not None:
+            raise DuplicateImageError()
+
+    # `storage.save` relê o arquivo, então o ponteiro volta ao início.
+    await image.seek(0)
     image_path = await storage.save(image)
 
     item = ClothingItem(
         user_id=user_id,
         image_path=image_path,
+        image_hash=image_hash,
         name=data.name.strip(),
         category=data.category,
         cor_primaria=data.cor_primaria,

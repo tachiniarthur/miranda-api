@@ -5,17 +5,34 @@ Criação e atualização recebem os dados via `multipart/form-data`, pois inclu
 o upload do arquivo de imagem já processado (fundo removido) pelo frontend.
 """
 
-from __future__ import annotations
+# NOTA: este módulo deliberadamente NÃO usa `from __future__ import annotations`.
+# O decorator @limiter.limit do slowapi embrulha o endpoint com functools.wraps,
+# que não copia `__globals__`. Com as anotações adiadas (em string), o FastAPI
+# tentaria resolvê-las contra os globals do slowapi — onde os schemas deste
+# módulo não existem — e passaria a tratar o corpo da requisição como query
+# param. É a mesma armadilha já documentada em app/api/routes/auth.py.
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter, user_or_ip_key
 from app.models.enums import ClothingCategory
 from app.models.user import User
 from app.schemas.analyze import AnalyzeResponse, FieldInfo
@@ -35,7 +52,11 @@ from app.services.storage import (
     authenticated_image_url,
     image_storage,
 )
-from app.services.wardrobe_service import WardrobeError
+from app.services.wardrobe_service import (
+    DuplicateImageError,
+    QuotaExceededError,
+    WardrobeError,
+)
 
 router = APIRouter(prefix="/wardrobe/items", tags=["wardrobe"])
 
@@ -140,7 +161,13 @@ def get_item_image(
 
 
 @router.post("", response_model=ClothingItemPublic, status_code=201)
+# O teto vai num lambda, e não na string direta, para ser lido a cada
+# requisição: como string, o decorator congelaria o valor no import e mudar a
+# configuração exigiria reiniciar o processo.
+@limiter.limit(lambda: settings.WARDROBE_UPLOAD_RATE_LIMIT, key_func=user_or_ip_key)
 async def create_item(
+    request: Request,
+    response: Response,
     name: str = Form(...),
     category: str = Form(...),
     cor_primaria: str | None = Form(None),
@@ -177,13 +204,27 @@ async def create_item(
             image=image,
             storage=image_storage,
         )
+    except DuplicateImageError as exc:
+        # 409 pelo mesmo motivo da quota: conflito com o estado da conta, não
+        # falta de permissão.
+        raise HTTPException(status_code=409, detail=str(exc))
+    except QuotaExceededError as exc:
+        # 409 e não 403: não é falta de permissão, é conflito com o estado atual
+        # da conta — e o caminho para resolver é apagar uma peça, não pedir
+        # acesso.
+        raise HTTPException(status_code=409, detail=str(exc))
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _to_public(item)
 
 
 @router.post("/analyze", response_model=AnalyzeResponse)
+# Teto menor que o do upload: esta rota roda o FashionCLIP, o gasto de CPU mais
+# caro do projeto.
+@limiter.limit(lambda: settings.ANALYZE_RATE_LIMIT, key_func=user_or_ip_key)
 async def analyze_item(
+    request: Request,
+    response: Response,
     image: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ) -> AnalyzeResponse:

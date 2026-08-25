@@ -16,13 +16,22 @@ email-validator==2.2.0
 PyJWT==2.10.1
 bcrypt==4.2.1
 
+# ── Envio de e-mail (backend Resend) ──────────────────────────────────
+# Já vinha como dependência de teste (usada pelo TestClient do FastAPI), mas
+# app/services/email/sender.py importa httpx em nível de módulo para falar com
+# a API do Resend — sem isso aqui, uma instalação de produção com
+# EMAIL_BACKEND=resend quebraria no import.
+httpx==0.28.1
+
 # ── Upload de arquivos (multipart/form-data) ─────────────────────────
 python-multipart==0.0.20
 
 # ── Rate limiting das rotas de autenticação ──────────────────────────
-# Armazenamento em memória do processo por padrão. Com mais de um worker,
-# configurar storage_uri="redis://..." em app/core/rate_limit.py.
 slowapi==0.1.10
+
+# Storage do rate limiter fora do processo. Em memória, cada worker do uvicorn
+# tem a própria cota — com 4 workers, um teto de 5 vira 20 na prática.
+redis==5.2.1
 
 # ── IA self-hosted (análise de peça) — SEM nenhuma API paga ───────────
 # FashionCLIP (via transformers + torch), k-means (scikit-learn) e cor (Pillow).

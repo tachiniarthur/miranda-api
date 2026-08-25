@@ -1,0 +1,48 @@
+# Dependências locais de desenvolvimento do Miranda API.
+#
+# Nenhuma das duas é obrigatória para a API subir: sem Mailpit o envio de e-mail
+# cai no backend `console` (imprime no log), sem Redis o rate limiter volta para
+# memória. Elas existem para que o comportamento local seja o mesmo de produção,
+# não para que a aplicação dependa de Docker.
+#
+#   docker compose up -d     # sobe as duas
+#   docker compose down      # derruba
+#   docker compose ps        # confere
+services:
+  # Captura de e-mail para desenvolvimento. NÃO envia nada para fora: tudo que a
+  # aplicação "manda" fica numa caixa de entrada web em http://localhost:8025.
+  # É o que permite testar o fluxo de verificação sem conta em serviço nenhum e
+  # sem expor endereço real.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: miranda-mailpit
+    restart: unless-stopped
+    ports:
+      # Vinculado a 127.0.0.1 (loopback) apenas. Sem o prefixo, Docker publica em
+      # 0.0.0.0 (todas as interfaces de rede, incluindo Wi-Fi), expondo a UI de
+      # e-mail capturado (com links de reset) e credenciais SMTP a qualquer máquina
+      # na rede local. Este Mailpit não tem autenticação e não deve ser acessível
+      # da LAN — se removendo o prefixo, faça isso apenas com autenticação ativada.
+      - "127.0.0.1:1025:1025"   # SMTP — é para cá que a API envia
+      - "127.0.0.1:8025:8025"   # interface web — é aqui que você lê
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+  # Storage do rate limiter. Em memória, cada worker do uvicorn teria a própria
+  # cota — com 4 workers, um teto de 5 tentativas vira 20 na prática.
+  redis:
+    image: redis:7-alpine
+    container_name: miranda-redis
+    restart: unless-stopped
+    ports:
+      # Vinculado a 127.0.0.1 (loopback) apenas. Sem o prefixo, Docker publica em
+      # 0.0.0.0 (todas as interfaces de rede, incluindo Wi-Fi), expondo um Redis
+      # sem autenticação a qualquer máquina na rede local. Isso permitiria limpar
+      # contadores de rate limit de um ataque ou explorar a instância. Faça isso
+      # com deliberação — requer autenticação em produção de qualquer forma.
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Sem persistência de propósito: o que vive aqui são contadores de rate
+    # limit, que podem (e devem) morrer junto com o contêiner.

@@ -30,6 +30,32 @@ log a cada chamada (ver `claude_client`). Não há controle de quota nesta fase.
 Degradar graciosamente. Esta função NUNCA lança: guarda-roupa insuficiente, API
 fora do ar ou resposta ilegível viram `looks: []` com uma `note` que explica o
 que houve. A rota devolve HTTP 200 em todos os casos.
+
+── ⚠️ LIMITAÇÃO CONHECIDA: a composição confia na CATEGORIA ────────────────
+A estrutura de um look — nunca vestido com peça de baixo, nunca duas peças de
+baixo — é decidida pela `category` gravada em cada peça, que vem da análise de
+imagem (FashionCLIP) ou do preenchimento manual. Não há reconhecimento visual
+em tempo de composição: nem aqui, nem no modelo, que recebe a categoria como
+texto e acredita nela.
+
+Portanto **a qualidade da composição depende da qualidade da categorização**.
+Um vestido rotulado por engano como `saia` vira peça de baixo e será combinado
+com uma peça de cima. Isso parece um erro de composição e não é: o dado chegou
+errado.
+
+Três camadas atenuam, nenhuma resolve:
+  1. os prompts de `vestido` e `saia` em `labels.py` foram escritos para
+     separar as duas classes pelo eixo que as distingue — cobertura do tronco
+     (ver `docs/superpowers/relatorio-vestido-saia.md`);
+  2. o limiar de confiança (`FASHION_CLIP_THRESHOLD_CATEGORIA`) deixa o campo
+     NULO em vez de chutar quando o modelo está em dúvida;
+  3. `_structure_is_valid` reconfere a saída e descarta o look que violar a
+     estrutura — mas ele julga pelas MESMAS categorias, então não enxerga um
+     vestido escondido atrás do rótulo `saia`.
+
+A correção de verdade é o usuário poder corrigir a categoria na ficha da peça,
+o que a interface já permite. Nenhum classificador é perfeito e este projeto
+não pretende esconder isso.
 """
 
 from __future__ import annotations

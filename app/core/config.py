@@ -150,6 +150,91 @@ class Settings(BaseSettings):
     # conta, não o de cada pessoa. Ver README, seção 12.
     ENABLE_PROMPT_CACHE: bool = False
 
+    # ── Envio de e-mail ───────────────────────────────────────────────
+    # Três backends, trocados por variável — nenhum código muda ao hospedar:
+    #   console — só registra no log. Padrão, e o que roda nos testes.
+    #   smtp    — Mailpit local (docker compose up -d). Captura tudo numa caixa
+    #             web em http://localhost:8025 e NÃO envia nada para fora.
+    #   resend  — serviço transacional real. Exige RESEND_API_KEY e, para
+    #             enviar a endereços que não sejam o seu, um domínio verificado.
+    #
+    # O padrão é `console` de propósito: a aplicação precisa subir e funcionar
+    # numa máquina sem Docker e sem conta em serviço nenhum.
+    EMAIL_BACKEND: str = "console"
+    EMAIL_FROM: str = "Miranda <nao-responda@miranda.local>"
+
+    SMTP_HOST: str = "localhost"
+    SMTP_PORT: int = 1025
+
+    RESEND_API_KEY: str = ""
+
+    # Base das URLs que vão DENTRO dos e-mails (o frontend, não a API). É o que
+    # o usuário clica, então precisa ser o endereço público do app.
+    APP_BASE_URL: str = "http://localhost:3000"
+
+    # ── Verificação de e-mail ─────────────────────────────────────────
+    # Exigir e-mail verificado para entrar.
+    #
+    # DESLIGADO por padrão, e isso é deliberado. Ligar isto torna a aplicação
+    # inutilizável se o servidor de e-mail não estiver de pé — uma trava que
+    # depende de um contêiner rodando é uma trava que prende o dono do projeto.
+    # Além disso, as contas criadas ANTES desta feature não têm como ter
+    # verificado nada e ficariam trancadas para fora.
+    #
+    # Ligue quando houver entrega de e-mail confiável (EMAIL_BACKEND=resend com
+    # domínio verificado) e depois de verificar as contas que já existem.
+    #
+    # Com a flag ligada, só o LOGIN é recusado (403). O cadastro não autentica
+    # ninguém, então segue respondendo igual — e o usuário tem o link no e-mail
+    # e a rota de reenvio para sair desse estado.
+    REQUIRE_VERIFIED_EMAIL: bool = False
+
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+
+    # ── Rate limiting ─────────────────────────────────────────────────
+    # Onde o slowapi guarda os contadores. `memory://` só é correto com UM
+    # worker: com vários, cada processo tem a própria cota e o teto configurado
+    # vale N vezes mais do que aparenta.
+    #
+    # Redis indisponível NÃO derruba a API — cai para memória com aviso no log
+    # (ver `rate_limit.resolve_storage_uri`).
+    RATE_LIMIT_STORAGE_URI: str = "redis://localhost:6379/0"
+
+    # ── Cookie de sessão ──────────────────────────────────────────────
+    # O JWT saiu do localStorage (alcançável por qualquer XSS) e passou a
+    # viajar num cookie httpOnly, que o JavaScript não lê.
+    #
+    # A contrapartida é CSRF: o navegador passa a mandar a credencial sozinho.
+    # SameSite=Lax é a defesa principal — o cookie não vai em requisição
+    # cross-site que não seja navegação de topo.
+    #
+    # `Strict` seria mais forte e QUEBRARIA a volta do link de verificação de
+    # e-mail, que é exatamente uma navegação de topo vinda de outro contexto.
+    AUTH_COOKIE_NAME: str = "miranda_session"
+    AUTH_COOKIE_SAMESITE: str = "lax"
+    # `Secure` faz o navegador só enviar o cookie por HTTPS. DESLIGADO por
+    # padrão porque em desenvolvimento a API roda em http://localhost e o
+    # navegador descartaria o cookie. LIGUE EM PRODUÇÃO — ver checklist de
+    # deploy no README.
+    AUTH_COOKIE_SECURE: bool = False
+
+    # ── Quota de guarda-roupa ─────────────────────────────────────────
+    # Teto de peças por usuário. Generoso para um guarda-roupa real (150 peças
+    # cadastradas com foto é muito mais do que a maioria das pessoas tem) e
+    # finito para um script: sem teto, uma conta enche o disco e a tabela, e
+    # cada peça ainda pode custar uma passada de CPU pelo FashionCLIP.
+    MAX_ITEMS_PER_USER: int = 150
+
+    # Tetos das rotas caras de guarda-roupa, por USUÁRIO autenticado (ver
+    # `rate_limit.user_or_ip_key`).
+    #
+    # Upload grava arquivo no disco; /analyze roda o FashionCLIP em CPU e é o
+    # gasto mais caro do projeto — por isso o teto menor. Os dois números são
+    # generosos para uma pessoa (60 peças cadastradas numa hora é muito mais do
+    # que qualquer um faz) e apertados para um script.
+    WARDROBE_UPLOAD_RATE_LIMIT: str = "60/hour"
+    ANALYZE_RATE_LIMIT: str = "40/hour"
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")
