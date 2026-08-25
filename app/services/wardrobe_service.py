@@ -15,7 +15,12 @@ from app.models.clothing_item import ClothingItem
 from app.models.enums import ClothingCategory
 from app.models.user import User
 from app.schemas.clothing_item import ClothingItemCreate, ClothingItemUpdate
-from app.services.storage import ImageStorage
+from app.services.image_validation import (
+    ImageValidationError,
+    perceptual_hash,
+    read_and_validate_upload,
+)
+from app.services.storage import ImageStorage, StorageError
 
 
 class WardrobeError(Exception):
@@ -25,6 +30,16 @@ class WardrobeError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+class DuplicateImageError(Exception):
+    """Esta imagem já está cadastrada nesta conta."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Esta imagem já está cadastrada no seu guarda-roupa. "
+            "Use outra foto ou edite a peça existente."
+        )
 
 
 class QuotaExceededError(Exception):
@@ -90,11 +105,35 @@ async def create_item(
 ) -> ClothingItem:
     _assert_within_quota(db, user_id=user_id)
 
+    # Lê e valida ANTES de gravar: a checagem de duplicata precisa dos bytes, e
+    # recusar depois deixaria o arquivo órfão no disco — justamente o recurso
+    # que estas duas defesas existem para proteger.
+    try:
+        contents, _ext = await read_and_validate_upload(image)
+    except ImageValidationError as exc:
+        # Mesma tradução que `LocalImageStorage.save` faz: quem chama `create_item`
+        # trata StorageError.
+        raise StorageError(exc.message) from exc
+
+    image_hash = perceptual_hash(contents)
+    if image_hash is not None:
+        ja_existe = db.scalar(
+            select(ClothingItem.id).where(
+                ClothingItem.user_id == user_id,
+                ClothingItem.image_hash == image_hash,
+            )
+        )
+        if ja_existe is not None:
+            raise DuplicateImageError()
+
+    # `storage.save` relê o arquivo, então o ponteiro volta ao início.
+    await image.seek(0)
     image_path = await storage.save(image)
 
     item = ClothingItem(
         user_id=user_id,
         image_path=image_path,
+        image_hash=image_hash,
         name=data.name.strip(),
         category=data.category,
         cor_primaria=data.cor_primaria,

@@ -41,6 +41,16 @@ class ClothingItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Caminho relativo do arquivo salvo localmente (ex.: "clothing_images/<uuid>.png").
     image_path: Mapped[str] = mapped_column(String(512), nullable=False)
 
+    # dHash de 64 bits da imagem, em hexadecimal. Usado para recusar o reenvio
+    # da MESMA foto pelo mesmo usuário — ver `image_validation.perceptual_hash`.
+    #
+    # Nulo é permitido: as peças cadastradas antes desta coluna não têm hash, e
+    # recalculá-las exigiria reabrir cada arquivo do storage. Peça sem hash
+    # simplesmente não participa da checagem de duplicata.
+    image_hash: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, index=True
+    )
+
     # ── Atributos de moda ─────────────────────────────────────────────
     # Todos aceitam NULL: hoje são preenchidos manualmente no formulário,
     # futuramente serão inferidos pela camada de IA (services/ai).

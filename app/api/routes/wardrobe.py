@@ -52,7 +52,11 @@ from app.services.storage import (
     authenticated_image_url,
     image_storage,
 )
-from app.services.wardrobe_service import QuotaExceededError, WardrobeError
+from app.services.wardrobe_service import (
+    DuplicateImageError,
+    QuotaExceededError,
+    WardrobeError,
+)
 
 router = APIRouter(prefix="/wardrobe/items", tags=["wardrobe"])
 
@@ -200,6 +204,10 @@ async def create_item(
             image=image,
             storage=image_storage,
         )
+    except DuplicateImageError as exc:
+        # 409 pelo mesmo motivo da quota: conflito com o estado da conta, não
+        # falta de permissão.
+        raise HTTPException(status_code=409, detail=str(exc))
     except QuotaExceededError as exc:
         # 409 e não 403: não é falta de permissão, é conflito com o estado atual
         # da conta — e o caminho para resolver é apagar uma peça, não pedir
