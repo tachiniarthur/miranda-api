@@ -59,3 +59,20 @@ def test_dress_not_confused_with_skirt(model_available: bool):
     scored = dict(classify(str(TEST_IMAGES / "12.jpg"), CATEGORY_CANDIDATES))
     assert scored["vestido"] > scored["saia"]
     assert scored["vestido"] > 0.5
+
+
+def test_o_vestido_ganha_da_saia_com_margem_folgada(model_available: bool):
+    """
+    Não basta vencer: a margem precisa ser folgada. Uma vitória por 0.01 é
+    ruído, e a próxima mudança de prompt a inverteria sem ninguém notar.
+
+    O limiar é 0.5, e não a margem medida (0.997 em 2026-08-25, ver
+    docs/superpowers/relatorio-vestido-saia.md): o teste existe para pegar um
+    colapso da distinção, não para travar o modelo num número exato.
+    """
+    from app.services.ai.fashion_clip import classify
+    from app.services.ai.labels import CATEGORY_CANDIDATES
+
+    scored = dict(classify(str(TEST_IMAGES / "12.jpg"), CATEGORY_CANDIDATES))
+    margem = scored["vestido"] - scored["saia"]
+    assert margem > 0.5, f"margem estreita demais: {margem:.3f}"
