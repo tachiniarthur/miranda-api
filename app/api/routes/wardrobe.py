@@ -43,20 +43,8 @@ from app.schemas.clothing_item import (
 )
 from app.services import wardrobe_service
 from app.services.ai import NotClothingError, analyze_clothing_item_detailed
-from app.services.image_validation import (
-    ImageValidationError,
-    read_and_validate_upload,
-)
-from app.services.storage import (
-    StorageError,
-    authenticated_image_url,
-    image_storage,
-)
-from app.services.wardrobe_service import (
-    DuplicateImageError,
-    QuotaExceededError,
-    WardrobeError,
-)
+from app.services.image_validation import read_and_validate_upload
+from app.services.storage import authenticated_image_url, image_storage
 
 router = APIRouter(prefix="/wardrobe/items", tags=["wardrobe"])
 
@@ -108,12 +96,7 @@ def get_item(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ClothingItemPublic:
-    try:
-        item = wardrobe_service.get_item(
-            db, user_id=current_user.id, item_id=item_id
-        )
-    except WardrobeError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    item = wardrobe_service.get_item(db, user_id=current_user.id, item_id=item_id)
     return _to_public(item)
 
 
@@ -135,12 +118,7 @@ def get_item_image(
     Aqui a peça é resolvida por `get_item`, a mesma função usada pelas rotas de
     leitura/edição/exclusão, que responde 404 quando a peça é de outro usuário.
     """
-    try:
-        item = wardrobe_service.get_item(
-            db, user_id=current_user.id, item_id=item_id
-        )
-    except WardrobeError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    item = wardrobe_service.get_item(db, user_id=current_user.id, item_id=item_id)
 
     path = image_storage.path_for(item.image_path)
     if not path.is_file():
@@ -196,25 +174,13 @@ async def create_item(
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors())
 
-    try:
-        item = await wardrobe_service.create_item(
-            db,
-            user_id=current_user.id,
-            data=data,
-            image=image,
-            storage=image_storage,
-        )
-    except DuplicateImageError as exc:
-        # 409 pelo mesmo motivo da quota: conflito com o estado da conta, não
-        # falta de permissão.
-        raise HTTPException(status_code=409, detail=str(exc))
-    except QuotaExceededError as exc:
-        # 409 e não 403: não é falta de permissão, é conflito com o estado atual
-        # da conta — e o caminho para resolver é apagar uma peça, não pedir
-        # acesso.
-        raise HTTPException(status_code=409, detail=str(exc))
-    except StorageError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    item = await wardrobe_service.create_item(
+        db,
+        user_id=current_user.id,
+        data=data,
+        image=image,
+        storage=image_storage,
+    )
     return _to_public(item)
 
 
@@ -244,14 +210,11 @@ async def analyze_item(
     esta rota entrega os bytes ao Pillow e ao FashionCLIP, então deixá-la sem
     teto significaria decodificar em memória o que o cliente quisesse mandar.
     """
-    try:
-        contents, _ext = await read_and_validate_upload(image)
-    except ImageValidationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    contents, _ext = await read_and_validate_upload(image)
 
     try:
         result = analyze_clothing_item_detailed(contents)
-    except NotClothingError as exc:
+    except NotClothingError:
         raise HTTPException(
             status_code=422,
             detail={
@@ -311,19 +274,14 @@ async def update_item(
     # enviado no multipart; normalizamos isso para None.
     new_image = image if (image is not None and image.filename) else None
 
-    try:
-        item = await wardrobe_service.update_item(
-            db,
-            user_id=current_user.id,
-            item_id=item_id,
-            data=data,
-            image=new_image,
-            storage=image_storage,
-        )
-    except WardrobeError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
-    except StorageError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    item = await wardrobe_service.update_item(
+        db,
+        user_id=current_user.id,
+        item_id=item_id,
+        data=data,
+        image=new_image,
+        storage=image_storage,
+    )
     return _to_public(item)
 
 
@@ -333,10 +291,7 @@ def delete_item(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    try:
-        wardrobe_service.delete_item(
-            db, user_id=current_user.id, item_id=item_id, storage=image_storage
-        )
-    except WardrobeError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    wardrobe_service.delete_item(
+        db, user_id=current_user.id, item_id=item_id, storage=image_storage
+    )
     return Response(status_code=204)

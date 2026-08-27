@@ -31,7 +31,6 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UserPublic
 from app.services import auth_service
-from app.services.auth_service import AuthError
 from app.services.email.messages import render_password_reset
 from app.services.email.sender import send_email
 
@@ -100,12 +99,9 @@ def login(
     (scripts, um app nativo) não têm por que lidar com cookie — e o header
     `Authorization` segue aceito nas rotas protegidas.
     """
-    try:
-        access_token = auth_service.authenticate_user(
-            db, email=payload.email, password=payload.password
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    access_token = auth_service.authenticate_user(
+        db, email=payload.email, password=payload.password
+    )
 
     # httpOnly: o JavaScript não lê este valor, então um XSS não leva a sessão
     # embora. SameSite=Lax é a contrapartida obrigatória — com cookie, o
@@ -206,12 +202,9 @@ def reset_password(
     db: Session = Depends(get_db),
 ) -> MessageResponse:
     """Redefine a senha usando um token de redefinição válido."""
-    try:
-        auth_service.reset_password(
-            db, token=payload.token, new_password=payload.new_password
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    auth_service.reset_password(
+        db, token=payload.token, new_password=payload.new_password
+    )
     return MessageResponse(message="Senha redefinida com sucesso.")
 
 
