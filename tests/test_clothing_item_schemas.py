@@ -129,3 +129,61 @@ def test_o_put_nao_grava_estacao_duplicada(client, conta):
     )
     assert editada.status_code == 200
     assert editada.json()["estacoes"] == ["verao"]
+
+
+# ── Achado M17: o tri-estado de serve_chuva tem que sobreviver à edição ─────
+# O frontend mandava sempre 'true'/'false'. Uma peça salva como "não informado"
+# — que é o que a análise por regras produz de propósito, porque serve-chuva
+# depende do material — virava `false` na primeira edição, mesmo sem ninguém
+# tocar no campo. O valor ainda ia para o prompt pago.
+#
+# A correção é no formulário (terceira opção + omitir o campo quando nulo).
+# Estes testes fixam o contrato do backend do qual ela depende.
+def test_omitir_serve_chuva_na_criacao_grava_nulo(client, conta):
+    r = client.post(
+        "/api/wardrobe/items",
+        headers=_auth(conta),
+        data={"name": "Blazer", "category": "blazer"},
+        files={"image": ("p.png", _png(), "image/png")},
+    )
+    assert r.status_code == 201
+    assert r.json()["serve_chuva"] is None
+
+
+def test_omitir_serve_chuva_na_edicao_preserva_o_nulo(client, conta):
+    criada = client.post(
+        "/api/wardrobe/items",
+        headers=_auth(conta),
+        data={"name": "Casaco", "category": "casaco"},
+        files={"image": ("p.png", _png(), "image/png")},
+    )
+    item_id = criada.json()["id"]
+    assert criada.json()["serve_chuva"] is None
+
+    editada = client.put(
+        f"/api/wardrobe/items/{item_id}",
+        headers=_auth(conta),
+        data={"name": "Casaco", "category": "casaco"},
+    )
+    assert editada.status_code == 200
+    assert editada.json()["serve_chuva"] is None, (
+        "omitir o campo tem que preservar o 'não informado' — se virar false, "
+        "a edição afirma algo que a pessoa não disse"
+    )
+
+
+def test_enviar_serve_chuva_continua_funcionando(client, conta):
+    criada = client.post(
+        "/api/wardrobe/items",
+        headers=_auth(conta),
+        data={"name": "Capa", "category": "casaco", "serve_chuva": "true"},
+        files={"image": ("p.png", _png(), "image/png")},
+    )
+    assert criada.json()["serve_chuva"] is True
+
+    editada = client.put(
+        f"/api/wardrobe/items/{criada.json()['id']}",
+        headers=_auth(conta),
+        data={"name": "Capa", "category": "casaco", "serve_chuva": "false"},
+    )
+    assert editada.json()["serve_chuva"] is False
