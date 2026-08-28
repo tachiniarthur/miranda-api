@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from app.services.auth_service import AuthError
 from app.services.image_validation import ImageValidationError
+from app.services.look_service import LookQuotaExceededError
 from app.services.storage import StorageError
 from app.services.wardrobe_service import (
     DuplicateImageError,
@@ -58,6 +59,13 @@ async def _handle_quota_exceeded(_: Request, exc: QuotaExceededError) -> JSONRes
     return _detail(409, str(exc))
 
 
+async def _handle_look_quota(_: Request, exc: LookQuotaExceededError) -> JSONResponse:
+    # 429 e NÃO 409, ao contrário da quota de peças: aqui o limite é de tempo,
+    # não de estado da conta. Quem estourou resolve esperando o dia virar, não
+    # apagando nada — e 429 é o status que diz isso.
+    return _detail(429, str(exc))
+
+
 async def _handle_storage_error(_: Request, exc: StorageError) -> JSONResponse:
     # StorageError não carrega status nem `message`; 400 e `str(exc)` é o que as
     # rotas faziam.
@@ -82,5 +90,6 @@ def register_domain_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(WardrobeError, _handle_wardrobe_error)  # type: ignore[arg-type]
     app.add_exception_handler(DuplicateImageError, _handle_duplicate_image)  # type: ignore[arg-type]
     app.add_exception_handler(QuotaExceededError, _handle_quota_exceeded)  # type: ignore[arg-type]
+    app.add_exception_handler(LookQuotaExceededError, _handle_look_quota)  # type: ignore[arg-type]
     app.add_exception_handler(StorageError, _handle_storage_error)  # type: ignore[arg-type]
     app.add_exception_handler(ImageValidationError, _handle_image_validation)  # type: ignore[arg-type]
