@@ -9,6 +9,7 @@ import uuid
 from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.models.clothing_item import ClothingItem
@@ -115,7 +116,11 @@ async def create_item(
         # trata StorageError.
         raise StorageError(exc.message) from exc
 
-    image_hash = perceptual_hash(contents)
+    # `perceptual_hash` abre e redimensiona a imagem com Pillow — trabalho de
+    # CPU síncrono. Chamado direto de dentro deste `async def`, rodaria no event
+    # loop e bloquearia o worker inteiro (achado M5, mesma classe do FashionCLIP
+    # na rota /analyze, em escala menor).
+    image_hash = await run_in_threadpool(perceptual_hash, contents)
     if image_hash is not None:
         ja_existe = db.scalar(
             select(ClothingItem.id).where(

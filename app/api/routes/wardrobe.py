@@ -28,6 +28,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user
 from app.core.config import settings
@@ -212,8 +213,16 @@ async def analyze_item(
     """
     contents, _ext = await read_and_validate_upload(image)
 
+    # `run_in_threadpool` e não chamada direta: `analyze_clothing_item_detailed`
+    # é síncrona e roda o FashionCLIP, o gasto de CPU mais caro do projeto.
+    # Chamada direta de dentro de um `async def` executa NO event loop e trava o
+    # worker inteiro pela duração da inferência — nenhuma outra requisição é
+    # atendida, nem /api/health (achado M5).
+    #
+    # Declarar a rota como `def` não é alternativa: ela faz `await` na leitura
+    # do upload logo acima.
     try:
-        result = analyze_clothing_item_detailed(contents)
+        result = await run_in_threadpool(analyze_clothing_item_detailed, contents)
     except NotClothingError:
         raise HTTPException(
             status_code=422,
