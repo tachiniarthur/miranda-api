@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.models.enums import Ocasiao
+from app.models.enums import ClothingCategory, Ocasiao
 
 # Disciplinas de cor aceitas em `OccasionProfile.color_discipline`.
 COLOR_NEUTRAL = "neutro"      # nenhuma família de cor forte
@@ -208,7 +208,13 @@ OCCASION_PROFILES: dict[str, OccasionProfile] = {
         phrase="treinar",
         # Inviolável: nenhuma dessas peças vai para a academia, nem que o
         # guarda-roupa não tenha mais nada.
-        forbidden_categories=frozenset({"blazer", "vestido", "saia"}),
+        forbidden_categories=frozenset(
+            {
+                ClothingCategory.BLAZER.value,
+                ClothingCategory.VESTIDO.value,
+                ClothingCategory.SAIA.value,
+            }
+        ),
         wants_accessory=False,
     ),
 }
