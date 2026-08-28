@@ -259,6 +259,36 @@ def get_user_from_access_token(db: Session, token: str) -> User | None:
     return user
 
 
+def revoke_session(db: Session, token: str | None) -> bool:
+    """
+    Invalida os tokens já emitidos para o dono deste token. Devolve se revogou.
+
+    Chamada pelo logout. Incrementa `users.token_version`, que
+    `get_user_from_access_token` confere a cada requisição — então todo token
+    emitido antes desta chamada passa a ser recusado imediatamente.
+
+    Nunca lança e nunca exige sessão válida: o logout é uma rota pública e o
+    frontend ignora a falha dele, porque falhar o logout no servidor não pode
+    prender a pessoa na tela. Token ausente, corrompido ou já revogado
+    simplesmente não revoga nada e devolve False.
+
+    Efeito colateral assumido: derruba TODAS as sessões daquela conta, não só a
+    do dispositivo que saiu. A alternativa fina — denylist de `jti` até o `exp`
+    — exigiria estado no Redis, e a decisão foi não depender dele para isso.
+    """
+    if not token:
+        return False
+
+    user = get_user_from_access_token(db, token)
+    if user is None:
+        return False
+
+    user.token_version += 1
+    db.add(user)
+    db.commit()
+    return True
+
+
 # ── Redefinição de senha ──────────────────────────────────────────────
 
 def _revoke_outstanding_reset_tokens(

@@ -13,7 +13,7 @@ from dataclasses import replace
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import extract_token, get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import AUTH_RATE_LIMIT, limiter, stash_auth_identity
@@ -120,14 +120,29 @@ def login(
 
 
 @router.post("/logout", response_model=MessageResponse)
-def logout(response: Response) -> MessageResponse:
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
     """
-    Encerra a sessão apagando o cookie.
+    Encerra a sessão: revoga o token no servidor e apaga o cookie.
 
-    Não invalida o JWT no servidor — ele continua válido até expirar. Para
-    matar todas as sessões de uma vez existe `users.token_version`, que a troca
-    de senha já incrementa.
+    Antes só apagava o cookie, e o JWT seguia válido por até 12h — inclusive
+    pelo header `Authorization`. Quem tivesse copiado o token de um log, de um
+    proxy ou de um dispositivo compartilhado continuava dentro depois de a
+    pessoa clicar em "sair" (achado M1).
+
+    A rota continua PÚBLICA e nunca falha: o frontend chama o logout e ignora a
+    falha, porque falhar o logout no servidor não pode prender a pessoa na tela.
+    Sem token, ou com token inválido, apenas apaga o cookie.
+
+    Revogar aqui derruba todas as sessões daquela conta, não só a deste
+    dispositivo. É o custo assumido de usar `token_version` em vez de uma
+    denylist de `jti`, que exigiria estado no Redis.
     """
+    auth_service.revoke_session(db, extract_token(request))
+
     response.delete_cookie(
         key=settings.AUTH_COOKIE_NAME,
         path="/",

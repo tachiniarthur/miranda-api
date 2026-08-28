@@ -16,7 +16,7 @@ from app.models.user import User
 from app.services.auth_service import get_user_from_access_token
 
 
-def _extract_token(request: Request) -> str | None:
+def extract_token(request: Request) -> str | None:
     """
     Pega o token do header `Authorization` ou do cookie de sessão, nessa ordem.
 
@@ -36,7 +36,7 @@ def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-    token = _extract_token(request)
+    token = extract_token(request)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

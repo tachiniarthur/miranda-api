@@ -273,3 +273,78 @@ def test_corrida_incrementa_a_versao_uma_unica_vez(db, user):
 
     db.expire_all()
     assert db.get(User, user.id).token_version == antes + 1
+
+
+# ── Achado M1: o logout tem que revogar ───────────────────────────────────────
+# O logout só apagava o cookie. O JWT continuava válido por até 12h e continuava
+# aceito no header Authorization — quem tivesse copiado o token de um log, de um
+# proxy ou de um dispositivo compartilhado seguia dentro DEPOIS de a pessoa
+# clicar em "sair".
+#
+# A revogação usa o mecanismo que já existia e já é conferido a cada requisição:
+# incrementar `users.token_version`. O efeito colateral é assumido — sair num
+# dispositivo desloga todos —, e foi a escolha deliberada em vez de uma denylist
+# de jti, que exigiria estado no Redis.
+
+def test_o_logout_invalida_o_token_anterior(client, db, user):
+    token = create_access_token(str(user.id), token_version=user.token_version)
+    assert _me(client, token).status_code == 200
+
+    saida = client.post(
+        "/api/auth/logout", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert saida.status_code == 200
+
+    # O mesmo token, que funcionava uma linha acima, não passa mais.
+    assert _me(client, token).status_code == 401
+
+
+def test_o_logout_incrementa_a_versao_de_sessao(client, db, user):
+    antes = user.token_version
+    token = create_access_token(str(user.id), token_version=antes)
+
+    client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+
+    db.refresh(user)
+    assert user.token_version == antes + 1
+
+
+def test_o_logout_sem_sessao_nao_falha(client):
+    # A rota é pública de propósito: o frontend chama logout e ignora a falha
+    # (lib/api.ts), porque falhar o logout no servidor não pode prender a pessoa
+    # na tela. Exigir autenticação aqui quebraria esse contrato.
+    saida = client.post("/api/auth/logout")
+    assert saida.status_code == 200
+
+
+def test_o_logout_com_token_invalido_nao_falha(client):
+    # Token corrompido ou já revogado: apaga o cookie e segue, sem 401.
+    saida = client.post(
+        "/api/auth/logout", headers={"Authorization": "Bearer nao-e-um-jwt"}
+    )
+    assert saida.status_code == 200
+
+
+def test_o_logout_de_uma_conta_nao_derruba_a_outra(client, db, user):
+    outra = User(
+        name="Outra",
+        email=f"sessao-outra-{uuid.uuid4().hex}@exemplo.com",
+        hashed_password=hash_password(SENHA),
+    )
+    db.add(outra)
+    db.commit()
+    db.refresh(outra)
+    try:
+        token_outra = create_access_token(
+            str(outra.id), token_version=outra.token_version
+        )
+        token_user = create_access_token(str(user.id), token_version=user.token_version)
+
+        client.post(
+            "/api/auth/logout", headers={"Authorization": f"Bearer {token_user}"}
+        )
+
+        assert _me(client, token_outra).status_code == 200
+    finally:
+        db.delete(outra)
+        db.commit()
