@@ -1,9 +1,8 @@
 """Schemas Pydantic do domínio de "look do dia"."""
 
 import uuid
-from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.enums import ClothingCategory, CondicaoClimatica, Ocasiao
 
@@ -89,18 +88,3 @@ class GenerateLookResponse(BaseModel):
     # Nota opcional: guarda-roupa limitado para o clima ou para a ocasião, ou a
     # explicação de que não foi possível gerar agora.
     note: str | None = None
-
-
-class LookHistoryPublic(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    user_id: uuid.UUID
-    data_gerado: datetime
-    temperatura_min: float | None
-    temperatura_max: float | None
-    condicao_climatica: str | None
-    ocasiao: str | None
-    itens_sugeridos: dict | list | None
-    justificativa: str | None
-    created_at: datetime

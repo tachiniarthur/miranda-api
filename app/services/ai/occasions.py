@@ -34,12 +34,6 @@ from typing import Optional
 
 from app.models.enums import Ocasiao
 
-# ── Escala ordinal de formalidade ────────────────────────────────────────────
-# Compartilhada com look_generation (importada de lá para não duplicar a fonte
-# da verdade). Repetida aqui só como referência de leitura:
-#   esporte(0) · casual(1) · smart_casual(2) · social(3)
-FORMALITY_SCALE_SPAN = 3.0  # distância máxima possível entre dois registros
-
 # Disciplinas de cor aceitas em `OccasionProfile.color_discipline`.
 COLOR_NEUTRAL = "neutro"      # nenhuma família de cor forte
 COLOR_FREE = "livre"          # no máximo uma (padrão do sistema)
