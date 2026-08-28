@@ -161,6 +161,12 @@ def forgot_password(
     necessariamente o dono do e-mail, e qualquer um desses dois canais entregaria
     a conta a quem soubesse o endereço.
 
+    A garantia sobre o log não é declaratória — quem a cumpre é
+    `_mascara_tokens` em `app/services/email/sender.py`, que substitui o valor
+    de qualquer `token=` antes de o corpo ir para o log. Até esta rodada a
+    afirmação acima era falsa com o backend padrão (`console`), que despejava o
+    corpo inteiro (achado A1).
+
     Falha de entrega NÃO muda a resposta. Um servidor de e-mail fora do ar não
     pode virar um oráculo de "esta conta existe" — nem por status, nem por corpo.
     """

@@ -16,6 +16,7 @@ não pode variar conforme a entrega (senão vira canal de enumeração de contas
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage as _MIMEMessage
@@ -28,6 +29,27 @@ logger = logging.getLogger("miranda.email")
 
 RESEND_ENDPOINT = "https://api.resend.com/emails"
 _TIMEOUT_SECONDS = 10.0
+
+# Qualquer `token=<valor>` numa URL do corpo. Os tokens de redefinição e de
+# verificação são `secrets.token_urlsafe(32)`: alfanumérico mais `-` e `_`.
+_TOKEN_NA_URL = re.compile(r"(token=)[A-Za-z0-9_\-]+")
+
+
+def _mascara_tokens(texto: str) -> str:
+    """
+    Substitui o valor de qualquer `token=` do corpo por um marcador.
+
+    O corpo do e-mail de redefinição carrega a URL com o token, e o backend
+    `console` — que é o PADRÃO — despejava o corpo inteiro no log. Quem tivesse
+    leitura do log (operador, agregador, sidecar, backup, colega com acesso ao
+    servidor) tomava qualquer conta: bastava disparar um pedido de redefinição
+    para o e-mail alvo e copiar o token de lá. O token vale 30 minutos e a
+    redefinição não exige a senha antiga.
+
+    Mascara-se o VALOR e preserva-se o `token=`: o log continua mostrando a
+    forma da URL, que é o que serve para depurar, sem o segredo.
+    """
+    return _TOKEN_NA_URL.sub(r"\1[REDIGIDO]", texto)
 
 
 @dataclass(frozen=True)
@@ -46,12 +68,15 @@ def _send_console(message: EmailMessage) -> bool:
     Existe para a aplicação funcionar numa máquina sem Docker e sem conta em
     serviço nenhum. É também o backend dos testes — nenhuma suíte deve depender
     de rede.
+
+    O corpo passa por `_mascara_tokens` antes de ir ao log: o log é um ativo que
+    muita gente lê, e o corpo carrega o token que dá acesso à conta.
     """
     logger.info(
         "[e-mail não enviado: backend=console] para=%s assunto=%s\n%s",
         message.to,
         message.subject,
-        message.text,
+        _mascara_tokens(message.text),
     )
     return True
 
