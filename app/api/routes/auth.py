@@ -13,7 +13,7 @@ from dataclasses import replace
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import extract_token, get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import AUTH_RATE_LIMIT, limiter, stash_auth_identity
@@ -31,7 +31,6 @@ from app.schemas.auth import (
 )
 from app.schemas.user import UserPublic
 from app.services import auth_service
-from app.services.auth_service import AuthError
 from app.services.email.messages import render_password_reset
 from app.services.email.sender import send_email
 
@@ -100,12 +99,9 @@ def login(
     (scripts, um app nativo) não têm por que lidar com cookie — e o header
     `Authorization` segue aceito nas rotas protegidas.
     """
-    try:
-        access_token = auth_service.authenticate_user(
-            db, email=payload.email, password=payload.password
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    access_token = auth_service.authenticate_user(
+        db, email=payload.email, password=payload.password
+    )
 
     # httpOnly: o JavaScript não lê este valor, então um XSS não leva a sessão
     # embora. SameSite=Lax é a contrapartida obrigatória — com cookie, o
@@ -118,23 +114,45 @@ def login(
         samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        path="/",
+        # `/api` e não `/`: toda a API vive sob esse prefixo. Com `/` o cookie
+        # de sessão era enviado também para `/docs`, `/openapi.json`, `/redoc` e
+        # para qualquer caminho futuro servido pela mesma origem — superfície
+        # sem contrapartida funcional nenhuma (achado M9).
+        path="/api",
     )
     return TokenResponse(access_token=access_token)
 
 
 @router.post("/logout", response_model=MessageResponse)
-def logout(response: Response) -> MessageResponse:
+def logout(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
     """
-    Encerra a sessão apagando o cookie.
+    Encerra a sessão: revoga o token no servidor e apaga o cookie.
 
-    Não invalida o JWT no servidor — ele continua válido até expirar. Para
-    matar todas as sessões de uma vez existe `users.token_version`, que a troca
-    de senha já incrementa.
+    Antes só apagava o cookie, e o JWT seguia válido por até 12h — inclusive
+    pelo header `Authorization`. Quem tivesse copiado o token de um log, de um
+    proxy ou de um dispositivo compartilhado continuava dentro depois de a
+    pessoa clicar em "sair" (achado M1).
+
+    A rota continua PÚBLICA e nunca falha: o frontend chama o logout e ignora a
+    falha, porque falhar o logout no servidor não pode prender a pessoa na tela.
+    Sem token, ou com token inválido, apenas apaga o cookie.
+
+    Revogar aqui derruba todas as sessões daquela conta, não só a deste
+    dispositivo. É o custo assumido de usar `token_version` em vez de uma
+    denylist de `jti`, que exigiria estado no Redis.
     """
+    auth_service.revoke_session(db, extract_token(request))
+
     response.delete_cookie(
         key=settings.AUTH_COOKIE_NAME,
-        path="/",
+        # Tem que ser o MESMO path do `set_cookie` do login: o navegador só
+        # casa e apaga o cookie quando nome, domínio e path batem. Divergir
+        # aqui faria o logout parecer funcionar e deixar a sessão de pé.
+        path="/api",
         samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         httponly=True,
@@ -165,14 +183,25 @@ def forgot_password(
     necessariamente o dono do e-mail, e qualquer um desses dois canais entregaria
     a conta a quem soubesse o endereço.
 
+    A garantia sobre o log não é declaratória — quem a cumpre é
+    `_mascara_tokens` em `app/services/email/sender.py`, que substitui o valor
+    de qualquer `token=` antes de o corpo ir para o log. Até esta rodada a
+    afirmação acima era falsa com o backend padrão (`console`), que despejava o
+    corpo inteiro (achado A1).
+
     Falha de entrega NÃO muda a resposta. Um servidor de e-mail fora do ar não
     pode virar um oráculo de "esta conta existe" — nem por status, nem por corpo.
     """
     reset_token = auth_service.create_reset_token_for_email(db, email=payload.email)
     if reset_token is not None:
         user = auth_service.get_user_by_email(db, email=payload.email)
+        # `/forgot-password?token=…` e não `/reset-password`: a tela de escolher
+        # a senha nova já vive dentro de forgot-password (fase "reset"), com o
+        # formulário completo. Uma rota separada duplicaria esse formulário — e
+        # `/reset-password` simplesmente não existe no App Router, então o link
+        # dava 404 (achado A4).
         reset_url = (
-            f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={reset_token}"
+            f"{settings.APP_BASE_URL.rstrip('/')}/forgot-password?token={reset_token}"
         )
         message = replace(
             render_password_reset(user.name if user else "", reset_url),
@@ -206,12 +235,9 @@ def reset_password(
     db: Session = Depends(get_db),
 ) -> MessageResponse:
     """Redefine a senha usando um token de redefinição válido."""
-    try:
-        auth_service.reset_password(
-            db, token=payload.token, new_password=payload.new_password
-        )
-    except AuthError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    auth_service.reset_password(
+        db, token=payload.token, new_password=payload.new_password
+    )
     return MessageResponse(message="Senha redefinida com sucesso.")
 
 

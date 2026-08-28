@@ -66,6 +66,7 @@ import time
 from typing import Any, Optional, TypedDict
 
 from app.core.config import settings
+from app.models.enums import ClothingCategory, PesoTermico
 from app.services.ai import claude_client
 from app.services.ai.claude_client import LookApiFatal, LookApiTransient
 from app.services.ai.look_prompt import (
@@ -129,13 +130,16 @@ class LookParseError(Exception):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Categorias agrupadas por "posição" no look.
-BOTTOMS = {"calca", "saia"}          # parte de baixo
-TOPS = {"camisa", "malha"}           # parte de cima
-OUTERS = {"blazer", "casaco"}        # sobreposição
-DRESSES = {"vestido"}                # peça única (cobre o corpo inteiro)
-FOOTWEAR = {"calcado"}               # calçado
-SCARVES = {"cachecol"}               # complemento de aquecimento
-ACCESSORIES = {"acessorio", "outros"}  # complemento opcional
+BOTTOMS = {ClothingCategory.CALCA.value, ClothingCategory.SAIA.value}  # parte de baixo
+TOPS = {ClothingCategory.CAMISA.value, ClothingCategory.MALHA.value}  # parte de cima
+OUTERS = {ClothingCategory.BLAZER.value, ClothingCategory.CASACO.value}  # sobreposição
+DRESSES = {ClothingCategory.VESTIDO.value}  # peça única (cobre o corpo inteiro)
+FOOTWEAR = {ClothingCategory.CALCADO.value}  # calçado
+SCARVES = {ClothingCategory.CACHECOL.value}  # complemento de aquecimento
+ACCESSORIES = {  # complemento opcional
+    ClothingCategory.ACESSORIO.value,
+    ClothingCategory.OUTROS.value,
+}
 
 # ── Faixas de temperatura (°C) → pesos térmicos aceitáveis ───────────────────
 # A temperatura de referência dá MAIS peso à mínima ("vestir por segurança":
@@ -154,9 +158,9 @@ BAND_HOT = "quente"
 # permissiva): o campo fica vazio quando a análise não foi conclusiva, e cortar
 # a peça por isso puniria o usuário por uma limitação nossa.
 ACCEPTABLE_PESO: dict[str, set[str]] = {
-    BAND_COLD: {"pesado", "medio"},
-    BAND_MILD: {"medio", "leve"},
-    BAND_HOT: {"leve"},
+    BAND_COLD: {PesoTermico.PESADO.value, PesoTermico.MEDIO.value},
+    BAND_MILD: {PesoTermico.MEDIO.value, PesoTermico.LEVE.value},
+    BAND_HOT: {PesoTermico.LEVE.value},
 }
 
 MAX_LOOKS = 3

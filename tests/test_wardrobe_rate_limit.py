@@ -169,3 +169,30 @@ def test_os_padroes_sao_generosos_para_uma_pessoa():
     )
     assert s.WARDROBE_UPLOAD_RATE_LIMIT == "60/hour"
     assert s.ANALYZE_RATE_LIMIT == "40/hour"
+
+
+# ── Achado A3: o PUT aceitava upload sem teto de frequência ─────────────────
+# O POST tinha o decorator, o PUT não. Como o PUT também recebe imagem, grava no
+# disco e apaga o arquivo antigo, o teto do POST era contornável em laço via PUT
+# sobre uma peça existente — e a quota de 150 peças não protege aqui, porque
+# nenhuma peça é criada.
+def _edita(client, u, item_id, i=0):
+    return client.put(
+        f"/api/wardrobe/items/{item_id}",
+        headers=_auth(u),
+        data={"name": f"editada {i}", "category": "camisa"},
+        files={"image": ("p.png", _png(), "image/png")},
+    )
+
+
+def test_o_put_tambem_tem_teto(client, usuario):
+    criada = _sobe(client, usuario, 0)
+    assert criada.status_code == 201
+    item_id = criada.json()["id"]
+
+    # O slowapi conta por ENDPOINT: o POST acima não consome a cota do PUT.
+    # Três edições cabem no teto de 3/hora; a quarta é recusada.
+    assert _edita(client, usuario, item_id, 1).status_code == 200
+    assert _edita(client, usuario, item_id, 2).status_code == 200
+    assert _edita(client, usuario, item_id, 3).status_code == 200
+    assert _edita(client, usuario, item_id, 4).status_code == 429

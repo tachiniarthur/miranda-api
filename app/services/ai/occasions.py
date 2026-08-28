@@ -32,13 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from app.models.enums import Ocasiao
-
-# ── Escala ordinal de formalidade ────────────────────────────────────────────
-# Compartilhada com look_generation (importada de lá para não duplicar a fonte
-# da verdade). Repetida aqui só como referência de leitura:
-#   esporte(0) · casual(1) · smart_casual(2) · social(3)
-FORMALITY_SCALE_SPAN = 3.0  # distância máxima possível entre dois registros
+from app.models.enums import ClothingCategory, Ocasiao
 
 # Disciplinas de cor aceitas em `OccasionProfile.color_discipline`.
 COLOR_NEUTRAL = "neutro"      # nenhuma família de cor forte
@@ -214,7 +208,13 @@ OCCASION_PROFILES: dict[str, OccasionProfile] = {
         phrase="treinar",
         # Inviolável: nenhuma dessas peças vai para a academia, nem que o
         # guarda-roupa não tenha mais nada.
-        forbidden_categories=frozenset({"blazer", "vestido", "saia"}),
+        forbidden_categories=frozenset(
+            {
+                ClothingCategory.BLAZER.value,
+                ClothingCategory.VESTIDO.value,
+                ClothingCategory.SAIA.value,
+            }
+        ),
         wants_accessory=False,
     ),
 }

@@ -235,6 +235,23 @@ class Settings(BaseSettings):
     WARDROBE_UPLOAD_RATE_LIMIT: str = "60/hour"
     ANALYZE_RATE_LIMIT: str = "40/hour"
 
+    # ── Geração de look — a única rota que gasta dinheiro ─────────────
+    # Cada chamada custa até ANTHROPIC_MAX_ATTEMPTS requisições pagas ao
+    # Claude, com o guarda-roupa inteiro no prompt. São duas camadas, de
+    # propósito:
+    #
+    #   LOOK_RATE_LIMIT    barreira barata do slowapi: rejeita antes de tocar
+    #                      o banco. Mas vive no Redis, e o Redis pode cair
+    #                      para `memory://` sem avisar ninguém.
+    #   MAX_LOOKS_PER_DAY  o teto real, contado em `looks_history`. Não
+    #                      depende de Redis nenhum: sobrevive a reinício e à
+    #                      queda para memória.
+    #
+    # 10 por dia é folgado para uso real — ninguém compõe dez looks num dia —
+    # e apertado para um script em laço.
+    LOOK_RATE_LIMIT: str = "10/day"
+    MAX_LOOKS_PER_DAY: int = 10
+
     # ── Storage local ─────────────────────────────────────────────────
     # Pasta física onde as imagens das peças são gravadas.
     STORAGE_DIR: str = str(BASE_DIR / "storage" / "clothing_images")

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.clothing_item import ClothingItem
 from app.models.look_history import LookHistory
 from app.schemas.look import (
@@ -34,6 +36,46 @@ from app.services.storage import authenticated_image_url
 from app.services.wardrobe_service import list_items
 
 logger = logging.getLogger("miranda.look_service")
+
+
+class LookQuotaExceededError(Exception):
+    """
+    A conta atingiu o teto diário de gerações de look.
+
+    Vira HTTP 429 (e não 409, como a quota de peças) porque o limite é de
+    tempo, não de estado da conta: quem estourou resolve esperando o dia virar,
+    não apagando nada. Ver `app/core/exception_handlers.py`.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"Limite de {limit} looks por dia atingido. Tente de novo amanhã."
+        )
+        self.limit = limit
+
+
+def _looks_gerados_hoje(db: Session, *, user_id: uuid.UUID) -> int:
+    """
+    Quantos looks esta conta já gerou no dia corrente (UTC).
+
+    A janela é o dia em UTC, e não as últimas 24h, para que o teto reabra num
+    horário previsível em vez de deslizar com o uso — uma janela deslizante
+    puniria quem gerou tudo de manhã até a manhã seguinte.
+
+    A consulta usa o índice de `looks_history.user_id` que já existe.
+    """
+    inicio_do_dia = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return (
+        db.scalar(
+            select(func.count(LookHistory.id)).where(
+                LookHistory.user_id == user_id,
+                LookHistory.data_gerado >= inicio_do_dia,
+            )
+        )
+        or 0
+    )
 
 
 def _item_to_payload(item: ClothingItem) -> dict:
@@ -106,6 +148,12 @@ def generate_look(
     guarda-roupa insuficiente (nem chega a chamar a API) e API indisponível.
     Nos dois casos a resposta vem com `looks` vazio e uma `note` explicativa.
     """
+    # Teto ANTES de qualquer trabalho: a chamada adiante custa dinheiro real, e
+    # o pré-filtro gratuito só evita a chamada quando o guarda-roupa nem forma
+    # núcleo — duas peças bastam para toda requisição virar gasto.
+    if _looks_gerados_hoje(db, user_id=user_id) >= settings.MAX_LOOKS_PER_DAY:
+        raise LookQuotaExceededError(settings.MAX_LOOKS_PER_DAY)
+
     items = list_items(db, user_id=user_id)
     items_payload = [_item_to_payload(i) for i in items]
     condicoes = [c.value for c in payload.condicoes_climaticas]

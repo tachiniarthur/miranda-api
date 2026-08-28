@@ -34,8 +34,16 @@ class StorageError(Exception):
 class ImageStorage(Protocol):
     """Interface que qualquer backend de storage deve implementar."""
 
-    async def save(self, file: UploadFile) -> str:
-        """Salva o arquivo e retorna um `image_path` opaco."""
+    async def save(
+        self, file: UploadFile, *, validated: tuple[bytes, str] | None = None
+    ) -> str:
+        """
+        Salva o arquivo e retorna um `image_path` opaco.
+
+        `validated` permite a quem já leu e validou o arquivo passar o
+        resultado adiante, em vez de fazer o storage reler tudo — ver o
+        comentário em `LocalImageStorage.save`.
+        """
         ...
 
     def delete(self, image_path: str) -> None:
@@ -54,14 +62,23 @@ class LocalImageStorage:
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
-    async def save(self, file: UploadFile) -> str:
-        try:
-            contents, ext = await read_and_validate_upload(file)
-        except ImageValidationError as exc:
-            # Preserva o contrato desta camada: quem chama `save` trata
-            # StorageError. A extensão vem do formato REAL detectado no
-            # cabeçalho, não do Content-Type informado pelo cliente.
-            raise StorageError(exc.message) from exc
+    async def save(
+        self, file: UploadFile, *, validated: tuple[bytes, str] | None = None
+    ) -> str:
+        # Quem já leu e validou passa o resultado em `validated`. Sem isso, o
+        # `create_item` lia o arquivo duas vezes — uma para validar e checar
+        # duplicata, outra aqui — dobrando o pico de memória por requisição
+        # aprovada, com um `seek(0)` no meio para o ponteiro voltar.
+        if validated is not None:
+            contents, ext = validated
+        else:
+            try:
+                contents, ext = await read_and_validate_upload(file)
+            except ImageValidationError as exc:
+                # Preserva o contrato desta camada: quem chama `save` trata
+                # StorageError. A extensão vem do formato REAL detectado no
+                # cabeçalho, não do Content-Type informado pelo cliente.
+                raise StorageError(exc.message) from exc
 
         filename = f"{uuid.uuid4().hex}{ext}"
         destination = self._base_dir / filename

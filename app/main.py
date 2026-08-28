@@ -13,6 +13,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.api.routes import auth, looks, wardrobe
 from app.core.config import settings
+from app.core.exception_handlers import register_domain_exception_handlers
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from app.core.security_headers import SecurityHeadersMiddleware
 
@@ -28,6 +29,12 @@ app = FastAPI(
 # declarados por rota (hoje só nas de autenticação); não há limite global.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# ── Erros de domínio ──────────────────────────────────────────────────
+# Tradução central de exceção de domínio → HTTP. Antes disto cada rota repetia
+# o próprio `except`, e a rota que esquecesse devolvia 500 cru — falha por
+# omissão, que não aparece em code review.
+register_domain_exception_handlers(app)
 
 # ── Headers de segurança ──────────────────────────────────────────────
 # nosniff + X-Frame-Options em todas as respostas; HSTS só quando a API estiver

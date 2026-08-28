@@ -212,3 +212,53 @@ def test_duplicate_signup_notice_never_contains_a_password_or_token():
     assert "senha" not in lowered or "sua senha" in lowered
     assert "token" not in lowered
     assert "http" not in lowered or "/forgot" in lowered
+
+
+# ── Achado A1: o token não pode chegar ao log ───────────────────────────────
+# Com EMAIL_BACKEND=console (o padrão), `_send_console` despejava o corpo
+# INTEIRO no log — e o corpo carrega a URL com o token de redefinição. Quem
+# tivesse leitura do log tomava qualquer conta: bastava pedir reset para o
+# e-mail alvo e copiar o token de lá. O token vale 30 minutos e a redefinição
+# não pede a senha antiga.
+def test_o_backend_console_nao_loga_o_token(monkeypatch, caplog):
+    _backend(monkeypatch, "console")
+    msg = EmailMessage(
+        to="alvo@exemplo.com",
+        subject="Redefinição de senha",
+        text=(
+            "Para escolher uma senha nova, abra:\n"
+            "http://localhost:3000/forgot-password?token=SEGREDO-ABC123\n\n"
+            "O link vale por tempo limitado."
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="miranda.email"):
+        assert send_email(msg) is True
+
+    registrado = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SEGREDO-ABC123" not in registrado, "o token vazou para o log"
+    # O log continua servindo para depurar: destinatário e assunto ficam.
+    assert "alvo@exemplo.com" in registrado
+    assert "Redefinição de senha" in registrado
+
+
+def test_o_mascaramento_preserva_o_resto_do_corpo():
+    # Mascara-se o VALOR e preserva-se o `token=`: o log continua mostrando a
+    # forma da URL, que é o que serve para depurar, sem o segredo.
+    mascarado = sender._mascara_tokens(
+        "abra:\nhttp://x/forgot-password?token=ABC123\n\nO link vale por tempo limitado."
+    )
+    assert "ABC123" not in mascarado
+    assert "token=" in mascarado
+    assert "O link vale por tempo limitado." in mascarado
+
+
+def test_o_token_de_verificacao_tambem_e_mascarado(monkeypatch, caplog):
+    # O mesmo caminho vale para o e-mail de confirmação de conta.
+    _backend(monkeypatch, "console")
+    msg = render_email_verification("Fulana", "http://localhost:3000/verificar-email?token=VERIF-XYZ")
+    msg = EmailMessage(to="alvo@exemplo.com", subject=msg.subject, text=msg.text)
+    with caplog.at_level(logging.INFO, logger="miranda.email"):
+        assert send_email(msg) is True
+
+    registrado = "\n".join(r.getMessage() for r in caplog.records)
+    assert "VERIF-XYZ" not in registrado
