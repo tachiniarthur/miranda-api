@@ -153,3 +153,28 @@ def test_a_quota_de_uma_conta_nao_afeta_a_outra(client, conta):
     db.query(User).filter(User.id == outra_id).delete()
     db.commit()
     db.close()
+
+
+# ── Achado M18: intervalo de temperatura invertido ─────────────────────────
+# A regra `min < max` existia SÓ no frontend, imposta por atributos HTML
+# dinâmicos (`max={maxTemp-1}` / `min={minTemp+1}`). O backend validava cada
+# temperatura isoladamente, então `min=50, max=10` passava — e a média
+# ponderada de `_reference_temp` calculava um intervalo invertido, escolhendo
+# uma faixa térmica sem sentido. Sem erro, sem log: resultado silenciosamente
+# errado, pago com uma chamada à API.
+def test_intervalo_invertido_e_recusado(client, conta):
+    payload = {**PAYLOAD, "temperatura_min": 50, "temperatura_max": 10}
+    r = client.post("/api/looks/generate", json=payload, headers=_auth(conta))
+    assert r.status_code == 422
+
+
+def test_minima_igual_a_maxima_e_recusada(client, conta):
+    # Faixa de largura zero não descreve um dia; é entrada malformada.
+    payload = {**PAYLOAD, "temperatura_min": 20, "temperatura_max": 20}
+    r = client.post("/api/looks/generate", json=payload, headers=_auth(conta))
+    assert r.status_code == 422
+
+
+def test_intervalo_valido_continua_passando(client, conta):
+    r = client.post("/api/looks/generate", json=PAYLOAD, headers=_auth(conta))
+    assert r.status_code == 200

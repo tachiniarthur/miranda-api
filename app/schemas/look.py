@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.enums import ClothingCategory, CondicaoClimatica, Ocasiao
 
@@ -34,6 +34,25 @@ class GenerateLookRequest(BaseModel):
                 seen.add(c.value)
                 unique.append(c)
         return unique
+
+    @model_validator(mode="after")
+    def _minima_menor_que_maxima(self) -> "GenerateLookRequest":
+        """
+        A mínima do dia tem que ser menor que a máxima.
+
+        A regra existia só no frontend, imposta pelos atributos HTML do slider
+        (`max={maxTemp-1}` / `min={minTemp+1}`) — ou seja, morava na camada de
+        apresentação. Qualquer cliente não-navegador mandava `min=50, max=10` e
+        o backend aceitava: `_reference_temp` calculava a média ponderada de um
+        intervalo invertido e `_band_for` escolhia uma faixa térmica sem
+        sentido, sem erro e sem log. Resultado silenciosamente errado, pago com
+        uma chamada à API (achado M18).
+        """
+        if self.temperatura_min >= self.temperatura_max:
+            raise ValueError(
+                "A temperatura mínima precisa ser menor que a máxima."
+            )
+        return self
 
 
 class LookItemPublic(BaseModel):
