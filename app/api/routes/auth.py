@@ -173,8 +173,13 @@ def forgot_password(
     reset_token = auth_service.create_reset_token_for_email(db, email=payload.email)
     if reset_token is not None:
         user = auth_service.get_user_by_email(db, email=payload.email)
+        # `/forgot-password?token=…` e não `/reset-password`: a tela de escolher
+        # a senha nova já vive dentro de forgot-password (fase "reset"), com o
+        # formulário completo. Uma rota separada duplicaria esse formulário — e
+        # `/reset-password` simplesmente não existe no App Router, então o link
+        # dava 404 (achado A4).
         reset_url = (
-            f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={reset_token}"
+            f"{settings.APP_BASE_URL.rstrip('/')}/forgot-password?token={reset_token}"
         )
         message = replace(
             render_password_reset(user.name if user else "", reset_url),
