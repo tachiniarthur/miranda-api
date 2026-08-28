@@ -40,18 +40,23 @@ class ClothingItemCreate(ClothingItemBase):
     """Payload de criação (a imagem chega como arquivo multipart separado)."""
 
 
-class ClothingItemUpdate(BaseModel):
-    """Payload de atualização — todos os campos são opcionais (patch parcial)."""
+class ClothingItemUpdate(ClothingItemBase):
+    """
+    Payload de atualização — todos os campos são opcionais (patch parcial).
+
+    Herda da base para que as regras valham dos dois lados. Antes esta classe
+    repetia os nove campos à mão, e o efeito não era só duplicação: o validator
+    `_dedupe_estacoes` não rodava aqui, então estações duplicadas passavam pelo
+    PUT (achado M20). Ajustar um `max_length` na base também deixava o update
+    para trás em silêncio.
+
+    Só `name` e `category` precisam de redeclaração, para afrouxar de
+    obrigatórios (no create) para opcionais (aqui). O resto já é `| None` na
+    base.
+    """
 
     name: str | None = Field(default=None, min_length=1, max_length=160)
     category: ClothingCategory | None = None
-    cor_primaria: str | None = Field(default=None, max_length=60)
-    cor_secundaria: str | None = Field(default=None, max_length=60)
-    estampa: str | None = Field(default=None, max_length=80)
-    formalidade: Formalidade | None = None
-    peso_termico: PesoTermico | None = None
-    serve_chuva: bool | None = None
-    estacoes: list[Estacao] | None = None
 
 
 class ClothingItemPublic(BaseModel):
