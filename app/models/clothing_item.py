@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import Boolean, Enum as SAEnum, ForeignKey, String, Text
+from sqlalchemy import Boolean, Enum as SAEnum, ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,19 @@ def _enum_values(enum_cls) -> list[str]:
 
 class ClothingItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "clothing_items"
+
+    # O índice de deduplicação é COMPOSTO, `(user_id, image_hash)`, porque a
+    # consulta é sempre "esta pessoa já tem esta imagem?" — nunca "alguém tem".
+    # Criado pela migration 0006 e confirmado no banco.
+    #
+    # Declará-lo aqui é o que faz o modelo bater com o schema real. Antes o
+    # modelo dizia `index=True` no `image_hash` (um índice de coluna única, que
+    # não existe) e omitia este composto (que existe): o próximo
+    # `alembic revision --autogenerate` emitiria a criação de um índice
+    # redundante e poderia propor derrubar o que a consulta usa.
+    __table_args__ = (
+        Index("ix_clothing_items_user_image_hash", "user_id", "image_hash"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -47,9 +60,11 @@ class ClothingItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Nulo é permitido: as peças cadastradas antes desta coluna não têm hash, e
     # recalculá-las exigiria reabrir cada arquivo do storage. Peça sem hash
     # simplesmente não participa da checagem de duplicata.
-    image_hash: Mapped[str | None] = mapped_column(
-        String(16), nullable=True, index=True
-    )
+    # SEM `index=True`: isso pediria um índice de coluna única
+    # (`ix_clothing_items_image_hash`) que nenhuma migration cria e que não
+    # existe no banco. O índice real é o composto declarado em `__table_args__`
+    # abaixo — e é ele que a consulta de duplicata usa (achado A6).
+    image_hash: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # ── Atributos de moda ─────────────────────────────────────────────
     # Todos aceitam NULL: hoje são preenchidos manualmente no formulário,
