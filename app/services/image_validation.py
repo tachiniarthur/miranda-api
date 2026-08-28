@@ -149,6 +149,22 @@ async def read_and_validate_upload(file: UploadFile) -> tuple[bytes, str]:
             status_code=415,
         )
 
+    # Teto ANTES de ler. O Starlette não impõe limite de tamanho para partes de
+    # arquivo — `formparsers.py:125` é só o limiar de spool para disco, e o
+    # guard de `:158` está no ramo das partes que NÃO são arquivo. Sem esta
+    # checagem, um corpo arbitrário é gravado em disco e trazido inteiro para a
+    # memória do processo antes de ser recusado, e o rate limit não protege:
+    # o multipart é parseado antes de o decorator do slowapi rodar.
+    #
+    # `size` é o tamanho já recebido pelo parser. Quando vier None (parser que
+    # não informa), a checagem por bytes de `validate_image_bytes` continua
+    # sendo a rede de segurança — mais cara, mas correta.
+    tamanho = getattr(file, "size", None)
+    if tamanho is not None and tamanho > MAX_FILE_BYTES:
+        raise ImageValidationError(
+            "Imagem muito grande (máximo 8 MB).", status_code=413
+        )
+
     contents = await file.read()
     ext = validate_image_bytes(content_type=file.content_type, contents=contents)
     return contents, ext

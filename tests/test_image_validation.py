@@ -8,6 +8,7 @@ confiar no Content-Type, que quem escolhe é o cliente.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import struct
 import zlib
@@ -16,6 +17,7 @@ import pytest
 from PIL import Image
 
 from app.services.image_validation import (
+    read_and_validate_upload,
     MAX_FILE_BYTES,
     MAX_IMAGE_PIXELS,
     ImageValidationError,
@@ -130,3 +132,70 @@ def test_teto_global_do_pillow_fica_configurado():
 
     apply_pillow_limits()
     assert Image.MAX_IMAGE_PIXELS == MAX_IMAGE_PIXELS
+
+
+# ── Achado A3: o teto tem que valer ANTES da leitura ─────────────────────────
+# O teto de 8 MB era conferido só depois de `await file.read()`, então um POST
+# de 5 GB era parseado, gravado em arquivo temporário e trazido inteiro para a
+# memória do processo antes de ser recusado. E o rate limit não protege esse
+# caminho: o multipart é parseado antes de o decorator do slowapi rodar.
+#
+# Confirmado no Starlette 0.41.3 instalado que não há teto de tamanho para
+# partes de arquivo — `formparsers.py:125` é só o limiar de spool para disco.
+#
+# Os testes usam `asyncio.run` em vez de pytest-asyncio: o projeto não tem esse
+# plugin, e acrescentar dependência estava fora do escopo desta rodada.
+class _UploadFalso:
+    """Dublê mínimo de UploadFile que registra se o corpo chegou a ser lido."""
+
+    def __init__(self, *, size: int | None, payload: bytes = b"") -> None:
+        self.size = size
+        self.content_type = "image/png"
+        self.foi_lido = False
+        self._payload = payload
+
+    async def read(self) -> bytes:
+        self.foi_lido = True
+        return self._payload
+
+    async def seek(self, offset: int) -> None:
+        return None
+
+
+def test_tamanho_acima_do_teto_recusa_sem_ler_o_corpo():
+    upload = _UploadFalso(
+        size=MAX_FILE_BYTES + 1,
+        payload=b"\x89PNG\r\n\x1a\n" + b"x" * MAX_FILE_BYTES,
+    )
+
+    with pytest.raises(ImageValidationError) as exc:
+        asyncio.run(read_and_validate_upload(upload))
+
+    assert exc.value.status_code == 413
+    assert upload.foi_lido is False, "o corpo foi lido antes de o teto ser conferido"
+
+
+def test_arquivo_dentro_do_teto_continua_sendo_lido_e_validado():
+    # O gate novo não pode recusar o que era aceito: um PNG legítimo passa.
+    dados = _png(10, 10)
+    upload = _UploadFalso(size=len(dados), payload=dados)
+
+    contents, ext = asyncio.run(read_and_validate_upload(upload))
+
+    assert upload.foi_lido is True
+    assert contents == dados
+    assert ext == ".png"
+
+
+def test_sem_size_informado_a_validacao_por_bytes_ainda_segura():
+    # Se o parser não informar `size`, o gate novo não tem o que conferir — e a
+    # checagem por bytes de `validate_image_bytes` continua sendo a rede.
+    grande = _UploadFalso(
+        size=None, payload=b"\x89PNG\r\n\x1a\n" + b"x" * MAX_FILE_BYTES
+    )
+
+    with pytest.raises(ImageValidationError) as exc:
+        asyncio.run(read_and_validate_upload(grande))
+
+    assert exc.value.status_code == 413
+    assert grande.foi_lido is True

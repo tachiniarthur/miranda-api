@@ -238,7 +238,14 @@ async def analyze_item(
 
 
 @router.put("/{item_id}", response_model=ClothingItemPublic)
+# Mesmo teto do POST: esta rota também aceita upload, grava no disco e apaga o
+# arquivo antigo. Sem o decorator, o teto de 60/hora da criação era contornável
+# em laço via PUT sobre uma peça existente — e a quota de 150 peças não protege
+# aqui, porque nenhuma peça é criada.
+@limiter.limit(lambda: settings.WARDROBE_UPLOAD_RATE_LIMIT, key_func=user_or_ip_key)
 async def update_item(
+    request: Request,
+    response: Response,
     item_id: uuid.UUID,
     name: str | None = Form(None),
     category: str | None = Form(None),

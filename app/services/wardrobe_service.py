@@ -109,7 +109,7 @@ async def create_item(
     # recusar depois deixaria o arquivo órfão no disco — justamente o recurso
     # que estas duas defesas existem para proteger.
     try:
-        contents, _ext = await read_and_validate_upload(image)
+        contents, ext = await read_and_validate_upload(image)
     except ImageValidationError as exc:
         # Mesma tradução que `LocalImageStorage.save` faz: quem chama `create_item`
         # trata StorageError.
@@ -126,9 +126,10 @@ async def create_item(
         if ja_existe is not None:
             raise DuplicateImageError()
 
-    # `storage.save` relê o arquivo, então o ponteiro volta ao início.
-    await image.seek(0)
-    image_path = await storage.save(image)
+    # Os bytes já foram lidos e validados acima: passar o resultado adiante
+    # evita que o storage releia o arquivo inteiro, o que dobrava o pico de
+    # memória por requisição aprovada e exigia um `seek(0)` no meio.
+    image_path = await storage.save(image, validated=(contents, ext))
 
     item = ClothingItem(
         user_id=user_id,
