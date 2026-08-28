@@ -1,0 +1,17 @@
+# Configuração de ferramentas de análise estática.
+#
+# Este arquivo existe SÓ para configurar ferramentas. O projeto não é um pacote
+# instalável: não há `[build-system]` nem `[project]`, e a instalação continua
+# sendo `pip install -r requirements.txt -r requirements-dev.txt`. A config de
+# testes segue no `pytest.ini`, que tem precedência sobre este arquivo.
+
+[tool.ruff]
+exclude = [".venv", "alembic/versions"]
+
+[tool.ruff.lint]
+# B008 é o padrão do FastAPI: Depends()/Form()/File() em argumento default.
+# São ocorrências legítimas — suprimir, não "corrigir".
+ignore = ["B008"]
+
+[tool.vulture]
+min_confidence = 80

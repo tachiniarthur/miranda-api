@@ -12,3 +12,10 @@ pytest==9.1.1
 # Cliente HTTP exigido pelo starlette.testclient.TestClient do FastAPI
 # (usado para exercitar as rotas em testes, ex.: POST /api/wardrobe/items/analyze).
 httpx==0.28.1
+
+# Análise estática. Configuração em `pyproject.toml` (ruff: exclui `.venv` e as
+# migrations geradas, suprime B008; vulture: confiança mínima de 80).
+#     .venv/bin/python -m ruff check .
+#     .venv/bin/python -m vulture app tests alembic scripts
+ruff==0.16.5
+vulture==2.16
