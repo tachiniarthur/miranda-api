@@ -114,7 +114,11 @@ def login(
         samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        path="/",
+        # `/api` e não `/`: toda a API vive sob esse prefixo. Com `/` o cookie
+        # de sessão era enviado também para `/docs`, `/openapi.json`, `/redoc` e
+        # para qualquer caminho futuro servido pela mesma origem — superfície
+        # sem contrapartida funcional nenhuma (achado M9).
+        path="/api",
     )
     return TokenResponse(access_token=access_token)
 
@@ -145,7 +149,10 @@ def logout(
 
     response.delete_cookie(
         key=settings.AUTH_COOKIE_NAME,
-        path="/",
+        # Tem que ser o MESMO path do `set_cookie` do login: o navegador só
+        # casa e apaga o cookie quando nome, domínio e path batem. Divergir
+        # aqui faria o logout parecer funcionar e deixar a sessão de pé.
+        path="/api",
         samesite=settings.AUTH_COOKIE_SAMESITE,
         secure=settings.AUTH_COOKIE_SECURE,
         httponly=True,

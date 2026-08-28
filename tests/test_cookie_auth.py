@@ -78,7 +78,13 @@ def test_o_login_seta_um_cookie_httponly(client, conta):
     bruto = resp.headers["set-cookie"].lower()
     assert "httponly" in bruto, "sem HttpOnly, o XSS continua alcançando o token"
     assert "samesite=lax" in bruto, "sem SameSite, o cookie abre CSRF"
-    assert "path=/" in bruto
+    # `path=/api` e não `path=/`: toda a API vive sob esse prefixo, e com `/` o
+    # cookie ia junto para /docs e /openapi.json (achado M9).
+    #
+    # A asserção precisa ser do valor exato. `"path=/" in bruto` — como estava —
+    # passaria também com `path=/api`, `path=/qualquer`, e com o valor errado:
+    # é substring de todos eles, então não verificava nada.
+    assert "path=/api" in bruto
 
 
 def test_o_cookie_sozinho_autentica(client, conta):
